@@ -192,7 +192,7 @@ This is a differentiating feature not present in any open-source alternative.
 
 ### 3.1 Connector Framework
 
-Both AMAIS and VADIM run on SQL Server and have **standardized schemas consistent across all customer installations** of each respective system. This means pre-built, hardcoded query templates — not configurable placeholders.
+Municipal ERP systems have **standardized schemas consistent across all customer installations**. This means pre-built, hardcoded query templates — not configurable placeholders. AMAIS runs on Progress OpenEdge; VADIM runs on SQL Server.
 
 Generic SQL connector using SQLAlchemy with driver-level abstraction.
 
@@ -235,15 +235,205 @@ conn_str = (
 conn = pyodbc.connect(conn_str)
 ```
 
-**Pre-built AMAIS queries** (targeting the known Progress schema):
-- **Chart of Accounts** — pull GL account list including cost centres, functions, and existing AMAIS groupings; used to populate the internal COA on first setup
-- **Trial balance by period** — debit/credit totals per account per period (month-end and YTD)
-- **GL transaction detail** — line-level transaction drill-down for supporting schedules
-- **Budget amounts by account/period** — original and amended budget figures from AMAIS budget module
-- **AP outstanding** — accounts payable subledger for accrual working papers
-- **AR outstanding** — accounts receivable subledger
+**Schema notes (confirmed from SYSTABLES/SYSCOLUMNS introspection):**
 
-The user selects "AMAIS" as the system type, enters host/credentials/port, and all queries work immediately against the known schema. The Progress ODBC driver must be installed on the server hosting OpenTrail WP (documented in deployment guide).
+Progress SQL-92 requires double-quoting all hyphenated table and column names (e.g. `PUB."gl-master"`, `"acct-fmtd"`). All queries below follow this convention.
+
+Key table roles:
+- `gl-master` — current fiscal year COA (keyed on `fiscal-year`; join key `"account-fmtd"`)
+- `gl-mstr` — historical fiscal year COA (keyed on `fisc-yr`; join key `"acct-fmtd"`; has `"gl-acc1"`..`"gl-acc9"` segment FKs)
+- `gl-act-prds` — **actual amounts by period** (the trial balance source — do NOT use the packed `prds` varchar in `gl-master`)
+- `gl-bud` — budget amounts by period (original, provisional, transfers, finals stored as separate `rec-type` rows)
+- `gl-trn` — primary GL transaction table (newer schema with segment FKs, `fisc-prd`, `fisc-yr`)
+- `gl-transaction` — older transaction table (legacy; single `account` numeric FK, `period` numeric)
+- `gl-prds` — fiscal period calendar (`fisc-yr` + `prd` + `date-from` + `date-thru` + `status-flag`)
+- `gl-dept` / `gl-fund` — segment lookup tables (just `c-code` + `descr`)
+- `gl-seg1`..`gl-seg9` — account segment descriptions (just `x-code` + `descr`)
+- `fa-hdr` — financial fixed assets (TCA schedule); use this for PSAB PS 3150
+- `fa-master` — fleet/work management assets (different module; not relevant for financial reporting)
+
+**Pre-built AMAIS queries:**
+
+```sql
+-- 1. CHART OF ACCOUNTS (current fiscal year)
+-- Populate internal COA on first setup; user then assigns PSAB categories
+SELECT
+    m."account-fmtd"    AS acct_fmtd,
+    m."dept-code"       AS dept_code,
+    m."fund-code"       AS fund_code,
+    m."object-no"       AS object_no,
+    m."project-no"      AS project_no,
+    m."acct-type"       AS acct_type,       -- R/E/A/L/Q (TBC)
+    m."record-class"    AS record_class,
+    m.description       AS description,
+    m."capital-acct"    AS capital_acct,
+    m."total-level"     AS total_level,
+    d.descr             AS dept_descr,
+    f.descr             AS fund_descr
+FROM PUB."gl-master" m
+LEFT JOIN PUB."gl-dept" d ON m."dept-code" = d."c-code"
+LEFT JOIN PUB."gl-fund" f ON m."fund-code" = f."c-code"
+WHERE m."fiscal-year" = {fiscal_year}
+ORDER BY m."account-fmtd"
+```
+
+```sql
+-- 2. TRIAL BALANCE BY PERIOD
+-- Primary source for working trial balance and financial statements
+-- rec-type codes TBC: expected ACT=actual, BUD=budget (confirm with user)
+SELECT
+    p."acct-fmtd"       AS acct_fmtd,
+    p."fisc-yr"         AS fisc_yr,
+    p."fisc-prd"        AS fisc_prd,
+    p."rec-type"        AS rec_type,
+    p.amount            AS amount,
+    m.description       AS description,
+    m."acct-type"       AS acct_type,
+    m."dept-code"       AS dept_code,
+    m."fund-code"       AS fund_code,
+    m."capital-acct"    AS capital_acct
+FROM PUB."gl-act-prds" p
+LEFT JOIN PUB."gl-master" m
+    ON p."acct-fmtd" = m."account-fmtd"
+    AND m."fiscal-year" = p."fisc-yr"
+WHERE p."fisc-yr" = {fiscal_year}
+  AND p."rec-type" = 'ACT'   -- TBC: confirm actual rec-type code
+ORDER BY p."acct-fmtd", p."fisc-prd"
+```
+
+```sql
+-- 3. GL TRANSACTION DETAIL
+-- Line-level drill-down for supporting schedules and leadsheets
+SELECT
+    t."acct-fmtd"       AS acct_fmtd,
+    t."fisc-yr"         AS fisc_yr,
+    t."fisc-prd"        AS fisc_prd,
+    t."primary-date"    AS trans_date,
+    t.amount            AS amount,
+    t.descr1            AS description1,
+    t.descr2            AS description2,
+    t."ref-no"          AS reference_no,
+    t."je-batch-no"     AS je_batch_no,
+    t."sl-code"         AS sl_code,
+    t."inv-no"          AS inv_no,
+    t."po-no"           AS po_no,
+    t."work-order"      AS work_order
+FROM PUB."gl-trn" t
+WHERE t."fisc-yr" = {fiscal_year}
+  AND t."fisc-prd" BETWEEN {period_from} AND {period_to}
+ORDER BY t."acct-fmtd", t."primary-date"
+```
+
+```sql
+-- 4. BUDGET BY PERIOD
+-- Includes original, provisional, transfers, final (distinguished by rec-type)
+SELECT
+    b."acct-fmtd"       AS acct_fmtd,
+    b."fisc-yr"         AS fisc_yr,
+    b."fisc-prd"        AS fisc_prd,
+    b."rec-type"        AS rec_type,
+    b.amount            AS amount,
+    m.description       AS description,
+    m."acct-type"       AS acct_type
+FROM PUB."gl-bud" b
+LEFT JOIN PUB."gl-master" m
+    ON b."acct-fmtd" = m."account-fmtd"
+    AND m."fiscal-year" = b."fisc-yr"
+WHERE b."fisc-yr" = {fiscal_year}
+ORDER BY b."acct-fmtd", b."fisc-prd", b."rec-type"
+```
+
+```sql
+-- 5. FISCAL PERIOD CALENDAR
+-- Loaded once per fiscal year; drives period selector in UI
+SELECT
+    "fisc-yr"       AS fisc_yr,
+    prd             AS period_no,
+    "date-from"     AS date_from,
+    "date-thru"     AS date_thru,
+    descr           AS period_name,
+    "status-flag"   AS status
+FROM PUB."gl-prds"
+ORDER BY "fisc-yr", prd
+```
+
+```sql
+-- 6. AP OUTSTANDING (for accrual working papers)
+-- stat codes TBC: PD=paid, VO=void (confirm with user)
+SELECT
+    i."vend-no"                         AS vendor_no,
+    m.name                              AS vendor_name,
+    i."inv-no"                          AS invoice_no,
+    i."inv-date"                        AS invoice_date,
+    i."due-date"                        AS due_date,
+    i."amt-inv"                         AS invoice_amount,
+    i."amt-paid"                        AS amount_paid,
+    (i."amt-inv" - i."amt-paid")        AS balance_owing,
+    i."fisc-yr"                         AS fisc_yr,
+    i."fisc-prd"                        AS fisc_prd,
+    i.stat                              AS status,
+    i.descr                             AS description
+FROM PUB."ap-inv" i
+LEFT JOIN PUB."ap-master" m ON i."vend-no" = m."vend-no"
+WHERE i.stat NOT IN ('PD', 'VO')   -- TBC: confirm paid/void status codes
+ORDER BY i."vend-no", i."inv-date"
+```
+
+```sql
+-- 7. AR OUTSTANDING
+-- ar-invos is a purpose-built outstanding AR view in AMAIS
+SELECT
+    o."customer-no"         AS customer_no,
+    m.name                  AS customer_name,
+    o."invoice-no"          AS invoice_no,
+    o."invoice-date"        AS invoice_date,
+    o."due-date"            AS due_date,
+    o.amount                AS amount,
+    o.description           AS description,
+    o."reference-no"        AS reference_no,
+    o."transaction-type"    AS transaction_type
+FROM PUB."ar-invos" o
+LEFT JOIN PUB."ar-master" m ON o."customer-no" = m."account-no"
+WHERE o."paid-indicator" = 0   -- 0=outstanding (bit field)
+ORDER BY o."customer-no", o."invoice-date"
+```
+
+```sql
+-- 8. FIXED ASSETS / TCA SCHEDULE (PS 3150)
+-- fa-hdr is the financial FA module; fa-master is fleet/WM (different module)
+-- stat codes TBC: confirm active/disposed codes with user
+SELECT
+    h."asset-no"        AS asset_no,
+    h."asset-class"     AS asset_class,
+    c.descr             AS class_descr,
+    h."asset-grp"       AS asset_group,
+    h.descr             AS description,
+    h."pur-date"        AS purchase_date,
+    h."pur-amt"         AS purchase_amount,
+    h."into-service"    AS in_service_date,
+    h."exp-life"        AS expected_life_years,
+    h."amort-code"      AS amort_code,
+    a."amort-method"    AS amort_method,
+    a.rate              AS amort_rate,
+    h."salvage_value"   AS salvage_value,
+    h."rep-cost"        AS replacement_cost,
+    h."federal-grant"   AS federal_grant,
+    h.dept              AS department,
+    h.stat              AS status
+FROM PUB."fa-hdr" h
+LEFT JOIN PUB."fa-class" c ON h."asset-class" = c."asset-class"
+LEFT JOIN PUB."fa-amort" a ON h."amort-code" = a."amort-code"
+WHERE h.stat = 'A'   -- TBC: confirm active status code
+ORDER BY h."asset-class", h."asset-no"
+```
+
+**Pending confirmations** (needed to finalize WHERE clauses — 4 quick queries):
+- `SELECT DISTINCT stat FROM PUB."ap-inv"` — AP invoice status codes
+- `SELECT DISTINCT "rec-type" FROM PUB."gl-act-prds"` — actual vs budget record types
+- `SELECT DISTINCT "acct-type" FROM PUB."gl-master"` — account type codes (R/E/A/L etc.)
+- `SELECT DISTINCT stat FROM PUB."fa-hdr"` — fixed asset status codes
+
+The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
 
 ### 3.3 VADIM Connector *(second priority)*
 
