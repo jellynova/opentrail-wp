@@ -280,7 +280,8 @@ ORDER BY m."account-fmtd"
 ```sql
 -- 2. TRIAL BALANCE BY PERIOD
 -- Primary source for working trial balance and financial statements
--- rec-type codes TBC: expected ACT=actual, BUD=budget (confirm with user)
+-- rec-type 'P' = Posted actuals (confirmed); B1-B7=budget versions; BP=budget provisional;
+-- C1/C2/C3/C7=comparative/cumulative (meaning TBC — pull all and let user configure)
 SELECT
     p."acct-fmtd"       AS acct_fmtd,
     p."fisc-yr"         AS fisc_yr,
@@ -288,7 +289,6 @@ SELECT
     p."rec-type"        AS rec_type,
     p.amount            AS amount,
     m.description       AS description,
-    m."acct-type"       AS acct_type,
     m."dept-code"       AS dept_code,
     m."fund-code"       AS fund_code,
     m."capital-acct"    AS capital_acct
@@ -297,7 +297,7 @@ LEFT JOIN PUB."gl-master" m
     ON p."acct-fmtd" = m."account-fmtd"
     AND m."fiscal-year" = p."fisc-yr"
 WHERE p."fisc-yr" = {fiscal_year}
-  AND p."rec-type" = 'ACT'   -- TBC: confirm actual rec-type code
+  AND p."rec-type" = 'P'   -- P = Posted actuals (confirmed)
 ORDER BY p."acct-fmtd", p."fisc-prd"
 ```
 
@@ -326,15 +326,17 @@ ORDER BY t."acct-fmtd", t."primary-date"
 
 ```sql
 -- 4. BUDGET BY PERIOD
--- Includes original, provisional, transfers, final (distinguished by rec-type)
+-- gl-bud stores budget amounts; rec-type in gl-act-prds includes B1-B7 (budget versions),
+-- BP (budget provisional). The "approved budget" rec-type for comparison column is TBC —
+-- pending user confirmation of which version (B1=original? B7=final amended?) to use.
+-- For now pull all from gl-bud and surface rec-type to user for configuration.
 SELECT
     b."acct-fmtd"       AS acct_fmtd,
     b."fisc-yr"         AS fisc_yr,
     b."fisc-prd"        AS fisc_prd,
     b."rec-type"        AS rec_type,
     b.amount            AS amount,
-    m.description       AS description,
-    m."acct-type"       AS acct_type
+    m.description       AS description
 FROM PUB."gl-bud" b
 LEFT JOIN PUB."gl-master" m
     ON b."acct-fmtd" = m."account-fmtd"
@@ -359,7 +361,8 @@ ORDER BY "fisc-yr", prd
 
 ```sql
 -- 6. AP OUTSTANDING (for accrual working papers)
--- stat codes TBC: PD=paid, VO=void (confirm with user)
+-- Confirmed stat codes: P=Paid, V=Void, H=Hold, S=Selected for payment run,
+-- U=Unposted, blank=Open. Outstanding = everything except Paid and Void.
 SELECT
     i."vend-no"                         AS vendor_no,
     m.name                              AS vendor_name,
@@ -375,7 +378,7 @@ SELECT
     i.descr                             AS description
 FROM PUB."ap-inv" i
 LEFT JOIN PUB."ap-master" m ON i."vend-no" = m."vend-no"
-WHERE i.stat NOT IN ('PD', 'VO')   -- TBC: confirm paid/void status codes
+WHERE i.stat NOT IN ('P', 'V')   -- P=Paid, V=Void (confirmed)
 ORDER BY i."vend-no", i."inv-date"
 ```
 
@@ -400,8 +403,13 @@ ORDER BY o."customer-no", o."invoice-date"
 
 ```sql
 -- 8. FIXED ASSETS / TCA SCHEDULE (PS 3150)
--- fa-hdr is the financial FA module; fa-master is fleet/WM (different module)
--- stat codes TBC: confirm active/disposed codes with user
+-- NOTE: fa-hdr (financial FA module) is empty at surveyed installation —
+-- this municipality does not appear to use the AMAIS financial FA module.
+-- TCA schedule will require an alternative source:
+--   Option A: Manual CSV import (asset register from spreadsheet)
+--   Option B: Query fa-master (fleet/WM module) if TCA assets are tracked there
+--   Option C: Derive from GL using capital-acct flag + fa_fund_src table
+-- Query below is preserved for installations that do use fa-hdr; skip otherwise.
 SELECT
     h."asset-no"        AS asset_no,
     h."asset-class"     AS asset_class,
@@ -423,15 +431,17 @@ SELECT
 FROM PUB."fa-hdr" h
 LEFT JOIN PUB."fa-class" c ON h."asset-class" = c."asset-class"
 LEFT JOIN PUB."fa-amort" a ON h."amort-code" = a."amort-code"
-WHERE h.stat = 'A'   -- TBC: confirm active status code
 ORDER BY h."asset-class", h."asset-no"
 ```
 
-**Pending confirmations** (needed to finalize WHERE clauses — 4 quick queries):
-- `SELECT DISTINCT stat FROM PUB."ap-inv"` — AP invoice status codes
-- `SELECT DISTINCT "rec-type" FROM PUB."gl-act-prds"` — actual vs budget record types
-- `SELECT DISTINCT "acct-type" FROM PUB."gl-master"` — account type codes (R/E/A/L etc.)
-- `SELECT DISTINCT stat FROM PUB."fa-hdr"` — fixed asset status codes
+**Confirmed status codes:**
+- `ap-inv.stat`: `P`=Paid, `V`=Void, `H`=Hold, `S`=Selected for payment run, `U`=Unposted, blank=Open
+- `gl-act-prds.rec-type`: `P`=Posted actuals; `B1`–`B7`=budget versions 1–7; `BP`=budget provisional; `C1`/`C2`/`C3`/`C7`=comparative/cumulative (meaning TBC)
+
+**Still pending:**
+- `gl-master."acct-type"` is empty in surveyed installation — try `SELECT DISTINCT "acct-type" FROM PUB."gl-mstr"` for historical table. Account type may need to be inferred from account number range or object-no range instead.
+- `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above). Ask during onboarding which module they use for asset tracking.
+- Budget rec-type: which version (`B1`–`B7` or `BP`) represents the **approved/final budget** used in PSAB Statement of Operations comparison column? Pending user confirmation.
 
 The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
 
