@@ -11,9 +11,9 @@
 ## Design Principles
 
 1. **Local-first, no cloud.** All data stays on municipal servers. No external API calls for core functionality. No SaaS auth providers, no cloud storage, no telemetry.
-2. **BC municipal context.** Fiscal year April 1 – March 31. PSAB/PSAS compliance as first-class concern. Not auditor software — this is the finance department's own tool.
-3. **SQL connector-native.** VADIM (Tempus Nova, SQL Server) and MAIS are primary data sources. The import model is live SQL queries, not just CSV upload — though CSV/Excel always available as fallback.
-4. **Budget workflow built-in.** Department heads submit requests; finance reviews; actuals pulled from VADIM for variance analysis. This is not an afterthought module.
+2. **BC municipal context.** Fiscal year January 1 – December 31. PSAB/PSAS compliance as first-class concern. Not auditor software — this is the finance department's own tool.
+3. **SQL connector-native.** AMAIS and VADIM (Tempus Nova) are the two primary ERP source systems — both SQL Server based, both with standardized schemas across all installations. AMAIS is the first integration target. The import model is live SQL queries against known table structures, not just CSV upload — though CSV/Excel always available as fallback.
+4. **Budget workflow built-in.** Department heads submit requests; finance reviews; actuals pulled from the ERP connector for variance analysis. This is not an afterthought module.
 5. **Minimize complexity.** 4–10 users. No need for distributed systems, message queues, or microservices. Simple, maintainable code wins.
 
 ---
@@ -119,11 +119,11 @@ User: id, username, email, hashed_password, role, department, is_active, created
 
 ### 1.3 Period / Fiscal Year Management
 
-BC municipal fiscal year: April 1 – March 31.
+Fiscal year: January 1 – December 31 (calendar year).
 
 **Model:**
 ```
-FiscalYear: id, label (e.g. "2024-25"), start_date, end_date, status (open/closed/locked)
+FiscalYear: id, label (e.g. "2024"), start_date, end_date, status (open/closed/locked)
 Period: id, fiscal_year_id, period_number (1-12), name, start_date, end_date, is_closed
 ```
 
@@ -135,7 +135,15 @@ Roll-forward: closing a fiscal year copies account mappings and document structu
 
 ### 2.1 Chart of Accounts & Mapping
 
-The application maintains its own chart of accounts (COA) separate from any source system. GL accounts from VADIM or CSV imports are mapped to this internal COA.
+The internal COA exists to provide PSAB category groupings for financial statement generation. It does **not** replace or duplicate the ERP's own COA — it layers PSAB structure on top.
+
+**COA population strategy (in priority order):**
+1. **Import from AMAIS connector** — when a MAIS connector is configured, the MAIS COA (account codes, descriptions, existing cost centre / function mappings) is read directly via the connector and imported as the base COA. This is the expected path for MAIS users.
+2. **Import from VADIM connector** — same approach for VADIM installations.
+3. **CSV/Excel import** — for initial setup without a live connector, or to supplement.
+4. **Manual entry** — available but not the expected workflow.
+
+Once the source COA is imported, the finance admin assigns each account (or account range/group) to a PSAB category. This mapping is saved and reused across periods; it only needs updating when new accounts are added in the ERP.
 
 **Models:**
 ```
@@ -144,9 +152,11 @@ AccountGroup: id, fiscal_year_id, group_code, description, psab_category
    revenue, expense, accumulated_surplus)
 
 Account: id, fiscal_year_id, gl_code, description, account_group_id,
-         normal_balance (debit/credit), is_active
+         normal_balance (debit/credit), is_active,
+         source_system (mais/vadim/csv/manual),
+         source_cost_centre, source_function  # preserved from ERP for reference
 
-AccountMapping: id, account_id, source_system (vadim/csv/etc), source_gl_code
+AccountMapping: id, account_id, source_system, source_gl_code
 ```
 
 **PSAB groupings built-in:**
@@ -182,13 +192,15 @@ This is a differentiating feature not present in any open-source alternative.
 
 ### 3.1 Connector Framework
 
+Both AMAIS and VADIM run on SQL Server and have **standardized schemas consistent across all customer installations** of each respective system. This means pre-built, hardcoded query templates — not configurable placeholders.
+
 Generic SQL connector using SQLAlchemy with driver-level abstraction.
 
 **Supported drivers:**
 | System | Driver | SQLAlchemy URL Pattern |
 |---|---|---|
-| VADIM (Tempus Nova) | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
-| MAIS | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
+| AMAIS (municipal ERP) | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
+| VADIM / Tempus Nova (municipal ERP) | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
 | Generic SQL Server | `pymssql` / `pyodbc` | `mssql+pymssql://` |
 | PostgreSQL | `psycopg2` | `postgresql+psycopg2://` |
 | MySQL/MariaDB | `pymysql` | `mysql+pymysql://` |
@@ -196,7 +208,8 @@ Generic SQL connector using SQLAlchemy with driver-level abstraction.
 
 **Connector Model:**
 ```
-ExternalConnector: id, name, db_type (mssql/postgres/mysql/sqlite),
+ExternalConnector: id, name,
+                   system_type (amais/vadim/mssql/postgres/mysql/sqlite),
                    host, port, database_name, username,
                    encrypted_password,  # Fernet-encrypted at rest
                    schema_name,         # e.g. "dbo" for SQL Server
@@ -206,29 +219,37 @@ ExternalConnector: id, name, db_type (mssql/postgres/mysql/sqlite),
 
 Passwords encrypted using a Fernet key stored as an environment variable (never in the DB unencrypted).
 
-### 3.2 VADIM-Specific Mapping
+### 3.2 AMAIS Connector *(first priority)*
 
-VADIM (Tempus Nova) common table structure for BC municipalities:
+AMAIS is a full municipal ERP system (general ledger, AP, AR, payroll, utilities billing, etc.) used by BC municipalities. All AMAIS installations share a consistent database schema, allowing pre-built query templates with no user configuration of table names.
 
-The connector includes a **VADIM profile** with pre-configured query templates targeting known VADIM table names (GL accounts, transaction detail, budget tables). The user selects "VADIM" as the connector type and the query templates are pre-filled — they only need to confirm table/column names match their installation.
+**Pre-built AMAIS queries:**
+- **Chart of Accounts** — pull GL account list including cost centres, functions, and existing AMAIS groupings; used to populate the internal COA on first setup
+- **Trial balance by period** — debit/credit totals per account per period (month-end and YTD)
+- **GL transaction detail** — line-level transaction drill-down for supporting schedules
+- **Budget amounts by account/period** — original and amended budget figures from AMAIS budget module
+- **AP outstanding** — accounts payable subledger for accrual working papers
+- **AR outstanding** — accounts receivable subledger
 
-Queries exposed:
+The user selects "AMAIS" as the system type, enters host/credentials, and all queries work immediately against the known schema.
+
+### 3.3 VADIM Connector *(second priority)*
+
+VADIM (Tempus Nova) is another BC municipal ERP on SQL Server, also with a consistent schema across installations. Integration follows the same pattern as AMAIS.
+
+**Pre-built VADIM queries:**
 - **GL Account list** — pull chart of accounts
 - **Trial balance by period** — debit/credit totals per account per period
-- **GL transaction detail** — line-level transaction drill-down (for supporting schedules)
+- **GL transaction detail** — line-level transaction drill-down
 - **Budget amounts by account/period** — feeds budgeting module
-
-### 3.3 MAIS-Specific Mapping
-
-MAIS integration targets property assessment data relevant to municipal revenue reporting (assessed values, levy calculations). Query templates for common MAIS schemas provided as a starting point — municipalities can customize SQL.
 
 ### 3.4 Import Workflow
 
-1. User configures connector (host, credentials, DB name)
-2. "Test Connection" verifies connectivity
-3. User selects fiscal year and period to pull
-4. System executes mapped queries, previews result set
-5. User confirms mapping of source GL codes → internal accounts (saved for future pulls)
+1. User configures connector (system type, host, credentials, DB name)
+2. "Test Connection" verifies connectivity and schema version
+3. **First-time setup:** "Import COA" pulls account structure from the ERP and populates the internal COA (see 2.1)
+4. User assigns PSAB categories to imported accounts (one-time; saved permanently)
+5. For each period pull: user selects fiscal year and period, system executes queries, previews results
 6. Data written to `TrialBalanceEntry` with `source = connector_id`
 7. Pull history logged with row counts and timestamp
 
@@ -341,7 +362,7 @@ BudgetLine: id, budget_year_id, account_id, approved_amount,
 
 ### 6.3 Budget-to-Actual Comparison
 
-Pulls actual YTD figures from the trial balance (sourced from VADIM connector) and compares against approved budget lines.
+Pulls actual YTD figures from the trial balance (sourced from the active ERP connector — AMAIS or VADIM) and compares against approved budget lines.
 
 Report outputs:
 - **Budget vs. Actual by Department** — variance $, variance %, traffic-light status
@@ -431,7 +452,7 @@ This is not optional — it's required for accountability in public sector finan
 | Backend framework | FastAPI (Python 3.12+) | Fast, async, excellent type safety, auto OpenAPI docs |
 | ORM | SQLAlchemy 2.0 + Alembic | Industry standard, supports both async and sync, great migration support |
 | App database | PostgreSQL 16 | Robust for financial data, JSONB for flexible audit logs |
-| External DB access | SQLAlchemy + pymssql + pyodbc | SQL Server support for VADIM/MAIS, plus generic SQL |
+| External DB access | SQLAlchemy + pymssql + pyodbc | SQL Server support for AMAIS and VADIM, plus generic SQL |
 | Auth | python-jose (JWT) + passlib (bcrypt) | Local auth, no cloud dependencies |
 | Encryption | cryptography (Fernet) | Encrypt DB credentials at rest |
 | PDF generation | WeasyPrint | CSS-to-PDF, good for financial statements |
@@ -452,10 +473,10 @@ This is not optional — it's required for accountability in public sector finan
 
 ### MVP (Phases 1–3): Core financial data pipeline
 1. Foundation: Docker Compose, FastAPI, React scaffold, PostgreSQL, auth
-2. Period/fiscal year management
-3. Chart of accounts and PSAB account mapping
-4. CSV/Excel trial balance import
-5. VADIM SQL connector (SQL Server)
+2. Period/fiscal year management (calendar year Jan–Dec)
+3. AMAIS SQL connector — COA import, trial balance pull, GL detail
+4. Chart of accounts with PSAB mapping (populated from AMAIS import)
+5. CSV/Excel trial balance import (fallback path)
 6. Generic SQL connector framework
 
 ### Phase 2: Working paper functionality
@@ -467,12 +488,12 @@ This is not optional — it's required for accountability in public sector finan
 
 ### Phase 3: Budget module
 12. Budget year setup and department request portal
-13. Budget-to-actual comparison with VADIM data
+13. Budget-to-actual comparison with AMAIS actuals
 14. Budget amendment tracking
 15. Budget reports (council-ready format)
 
 ### Phase 4: Polish & advanced features
-16. MAIS connector
+16. VADIM connector (same pattern as AMAIS, different schema)
 17. Custom SQL query builder
 18. Tangible Capital Asset schedule (PS 3150)
 19. Audit trail and activity log views
@@ -496,9 +517,9 @@ This is not optional — it's required for accountability in public sector finan
 
 ## Key Decisions & Rationale
 
-**Why FastAPI over Django?** FastAPI's async support matters for concurrent SQL Server queries against VADIM (which can be slow on some installations). Auto-generated OpenAPI docs also make it easy for the finance IT team to understand what the API does.
+**Why FastAPI over Django?** FastAPI's async support matters for concurrent SQL Server queries against AMAIS/VADIM (which can be slow on some installations). Auto-generated OpenAPI docs also make it easy for the finance IT team to understand what the API does.
 
-**Why not ERPNext as a base?** ERPNext's Frappe framework is opinionated and would constrain VADIM connector design. Building on FastAPI gives full control over the SQL connector architecture, which is essential for VADIM's specific table structure.
+**Why not ERPNext as a base?** ERPNext's Frappe framework is opinionated and would constrain the ERP connector design. Building on FastAPI gives full control over the SQL connector architecture, which is essential for querying AMAIS and VADIM's specific table structures.
 
 **Why PSAB groups hardcoded into the data model?** BC municipal reporting requirements are stable — PS 1201 has been the standard for years. Hardcoding PSAB structure into the account group model means every calculation and report template can rely on it without complex configuration.
 
