@@ -199,7 +199,7 @@ Generic SQL connector using SQLAlchemy with driver-level abstraction.
 **Supported drivers:**
 | System | Driver | SQLAlchemy URL Pattern |
 |---|---|---|
-| AMAIS (municipal ERP) | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
+| AMAIS (municipal ERP) | Progress OpenEdge via `pyodbc` + Progress ODBC driver | ODBC connection string |
 | VADIM / Tempus Nova (municipal ERP) | SQL Server via `pymssql` or `pyodbc` | `mssql+pymssql://` |
 | Generic SQL Server | `pymssql` / `pyodbc` | `mssql+pymssql://` |
 | PostgreSQL | `psycopg2` | `postgresql+psycopg2://` |
@@ -221,9 +221,21 @@ Passwords encrypted using a Fernet key stored as an environment variable (never 
 
 ### 3.2 AMAIS Connector *(first priority)*
 
-AMAIS is a full municipal ERP system (general ledger, AP, AR, payroll, utilities billing, etc.) used by BC municipalities. All AMAIS installations share a consistent database schema, allowing pre-built query templates with no user configuration of table names.
+AMAIS is a full municipal ERP system (general ledger, AP, AR, payroll, utilities billing, etc.) used by BC municipalities. All AMAIS installations share a consistent schema.
 
-**Pre-built AMAIS queries:**
+**Connection architecture:** AMAIS runs on **Progress OpenEdge** (not SQL Server). It exposes SQL access via a Progress SQL Broker through ODBC using the Progress OpenEdge ODBC driver (DataDirect or native). There is no SQLAlchemy dialect for Progress; the connector uses `pyodbc` directly with the Progress-specific ODBC connection string.
+
+```python
+# AMAIS connection via Progress ODBC SQL Broker
+conn_str = (
+    f"DRIVER={{Progress OpenEdge {driver_version} driver}};"
+    f"HOST={host};PORT={port};DB={database};"
+    f"UID={username};PWD={password};"
+)
+conn = pyodbc.connect(conn_str)
+```
+
+**Pre-built AMAIS queries** (targeting the known Progress schema):
 - **Chart of Accounts** — pull GL account list including cost centres, functions, and existing AMAIS groupings; used to populate the internal COA on first setup
 - **Trial balance by period** — debit/credit totals per account per period (month-end and YTD)
 - **GL transaction detail** — line-level transaction drill-down for supporting schedules
@@ -231,7 +243,7 @@ AMAIS is a full municipal ERP system (general ledger, AP, AR, payroll, utilities
 - **AP outstanding** — accounts payable subledger for accrual working papers
 - **AR outstanding** — accounts receivable subledger
 
-The user selects "AMAIS" as the system type, enters host/credentials, and all queries work immediately against the known schema.
+The user selects "AMAIS" as the system type, enters host/credentials/port, and all queries work immediately against the known schema. The Progress ODBC driver must be installed on the server hosting OpenTrail WP (documented in deployment guide).
 
 ### 3.3 VADIM Connector *(second priority)*
 
@@ -263,7 +275,7 @@ For advanced users: a **Custom Query** feature lets `finance_admin` users write 
 
 ### 4.1 Entry Types
 
-Following PSAB requirements (adapted from CWP's model, removing audit-specific types):
+Journal entry types for municipal finance working paper purposes:
 
 | Type | Description | Flows To |
 |---|---|---|
@@ -295,41 +307,83 @@ From the mapped trial balance + journal entries, the system auto-generates:
 
 ---
 
-## Phase 5: Financial Report Generator (PSAB)
+## Phase 5: Report Builder & Financial Statements
 
-### 5.1 PSAB Statement Templates
+The report system is a full-featured report builder, not a fixed template engine. Pre-built legislated report templates are provided as starting points, but every report is editable and users can build entirely custom reports from scratch.
 
-Built-in templates for BC municipal reporting under PSAB:
+### 5.1 Report Builder
+
+**Design model:** Reports are structured as a tree of sections → row groups → rows. Each row maps to one of:
+- An account or account group (pulling live balance data)
+- A calculated field (sum, difference, percentage, ratio of other rows)
+- A static text/label row
+- A dynamic value (linked to a specific account balance, date, or system field)
+
+Users can drag-and-drop rows, change account mappings, add formula rows, rename headings, set number formats, and configure comparative columns — all through the UI without writing code.
+
+**Report types supported:**
+| Category | Examples |
+|---|---|
+| **Legislated — PSAB** | Statement of Financial Position, Statement of Operations, SCNFA, Cash Flow Statement, Segment Disclosure, TCA Schedule, Notes |
+| **Legislated — LGDE/SOFI** | SOFI statements (Financial Position, Operations, SCNFA, Cash Flow), Supplier Payments schedule (>$25K), Employee Remuneration schedule (>$75K), Guarantee & Indemnity schedule |
+| **Working papers** | Working trial balance, leadsheets by PSAB group, AJE schedule, reclassification schedule |
+| **Budget** | Budget vs. actual by department, by account group, multi-year comparison, council budget presentation |
+| **Grant reporting** | Custom grant expenditure reports mapped to grant-specific account codes |
+| **Managerial** | Any user-defined report — departmental cost summaries, project tracking, utility rate analysis, etc. |
+
+**Report configuration stored as JSON:** Each saved report is a JSON definition (section tree + formatting + data source mappings). This makes reports portable, version-controllable, and copyable between fiscal years.
+
+### 5.2 Built-In Legislated Templates
+
+Pre-built templates that conform to current legislated requirements. These are used as starting points and can be modified but ship in a "protected" state so users can always revert to the standard layout.
+
+**PSAB Annual Financial Statements:**
 
 | Statement | Standard | Notes |
 |---|---|---|
-| Statement of Financial Position | PS 1201.031-.033 | Net Financial Assets/Debt as key line |
+| Statement of Financial Position | PS 1201.031–.033 | Net Financial Assets/Debt as key line |
 | Statement of Operations | PS 1201 | Budget vs. Actual required column |
 | Statement of Change in Net Financial Assets | PS 1201 | |
 | Statement of Cash Flow | PS 2450 | Direct or indirect method |
-| Schedule of Segment Disclosure | PS 2700 | Optional, common for larger towns |
-| Notes to Financial Statements | Various PS sections | Modular note blocks |
+| Schedule of Segment Disclosure | PS 2700 | Optional, common for larger municipalities |
 | Tangible Capital Asset Schedule | PS 3150 | By asset class |
+| Notes to Financial Statements | Various PS sections | Modular note blocks with dynamic value links |
 
-### 5.2 Report Designer
+**LGDE / SOFI (Financial Information Act, BC):**
 
-Not a general-purpose designer (that's too complex for MVP). Instead:
-- Templates are defined as structured JSON configs mapping PSAB line items to account groups
-- Finance admin can adjust which account groups roll up to which line item
-- Number formatting, comparative columns (current year / prior year / budget) configurable
-- Notes: rich text editor per note section with ability to link dynamic values (account balances, calculated figures)
+Required annually for BC local governments. Submitted to the province via the LGDE web system; this module generates the underlying schedules.
 
-### 5.3 Export
+| Schedule | Requirement |
+|---|---|
+| Statement of Financial Position | Same as PSAB SFP, LGDE format |
+| Statement of Operations | Same as PSAB SO, LGDE format |
+| Statement of Change in Net Financial Assets | LGDE format |
+| Statement of Cash Flows | LGDE format |
+| Schedule of Supplier Payments | Payments >$25,000 in the calendar year |
+| Schedule of Employee Remuneration & Expenses | Employees earning >$75,000 |
+| Schedule of Guarantee and Indemnity Agreements | Per s.168 LGDE requirements |
 
-- **PDF** via WeasyPrint (CSS-based, good enough for municipal financial statements)
-- **Excel** via openpyxl (for further manipulation, circulation to council)
+### 5.3 Leadsheets & Working Papers (Auto-Generated)
+
+From the mapped trial balance + journal entries:
+- Working trial balance (opening → adjustments → closing per account)
+- Leadsheets by PSAB group (auto-built from report builder layout)
+- Adjusting journal entry schedule
+- Reclassification schedule
+
+These are generated automatically but can also be opened in the report builder for customization.
+
+### 5.4 Export
+
+- **PDF** via WeasyPrint (CSS-to-PDF; handles multi-column financial statement layouts)
+- **Excel** via openpyxl (for circulation to council, further manipulation)
 - **Working papers package** — ZIP of all generated documents for a period
 
 ---
 
 ## Phase 6: Budgeting Module
 
-This is a key differentiator. CWP has no meaningful budget workflow; this module is built specifically for BC municipal budget processes.
+The budget module is built specifically for BC municipal budget processes and is a core feature of the system, not an afterthought.
 
 ### 6.1 Budget Workflow Overview
 
@@ -378,7 +432,7 @@ Mid-year budget amendments tracked separately from original budget. Amendment en
 
 ## Phase 7: Document Management
 
-Simplified from CWP's full engagement binder — focused on what a municipal finance team actually needs.
+Focused on what a municipal finance team actually needs for working paper and document management.
 
 ### 7.1 Working Paper Files
 
@@ -452,7 +506,7 @@ This is not optional — it's required for accountability in public sector finan
 | Backend framework | FastAPI (Python 3.12+) | Fast, async, excellent type safety, auto OpenAPI docs |
 | ORM | SQLAlchemy 2.0 + Alembic | Industry standard, supports both async and sync, great migration support |
 | App database | PostgreSQL 16 | Robust for financial data, JSONB for flexible audit logs |
-| External DB access | SQLAlchemy + pymssql + pyodbc | SQL Server support for AMAIS and VADIM, plus generic SQL |
+| External DB access | pyodbc (AMAIS/Progress direct) + SQLAlchemy + pymssql (VADIM/SQL Server) | AMAIS uses Progress ODBC driver directly; VADIM and generic SQL use SQLAlchemy |
 | Auth | python-jose (JWT) + passlib (bcrypt) | Local auth, no cloud dependencies |
 | Encryption | cryptography (Fernet) | Encrypt DB credentials at rest |
 | PDF generation | WeasyPrint | CSS-to-PDF, good for financial statements |
@@ -479,12 +533,14 @@ This is not optional — it's required for accountability in public sector finan
 5. CSV/Excel trial balance import (fallback path)
 6. Generic SQL connector framework
 
-### Phase 2: Working paper functionality
+### Phase 2: Working paper functionality & report builder
 7. Journal entries (adjusting and reclassifying)
 8. Auto-generated leadsheets and working trial balance
-9. PSAB financial statement templates (SFP, SO, SCNFA, SCF)
-10. PDF and Excel export
-11. Document management (file upload, folders, sign-off)
+9. Report builder core (section tree, account row mapping, calculated rows, comparative columns)
+10. Built-in PSAB templates (SFP, SO, SCNFA, SCF, Notes) — built as report builder configs
+11. LGDE/SOFI schedules (Supplier Payments, Employee Remuneration, Guarantees)
+12. PDF and Excel export
+13. Document management (file upload, folders, sign-off)
 
 ### Phase 3: Budget module
 12. Budget year setup and department request portal
