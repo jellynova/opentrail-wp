@@ -237,44 +237,38 @@ conn = pyodbc.connect(conn_str)
 
 **Schema notes (confirmed from SYSTABLES/SYSCOLUMNS introspection):**
 
-Progress SQL-92 requires double-quoting all hyphenated table and column names (e.g. `PUB."gl-master"`, `"acct-fmtd"`). All queries below follow this convention.
+Progress SQL-92 requires double-quoting all hyphenated table and column names (e.g. `PUB."gl-mstr"`, `"object-str"`). All queries below follow this convention.
+Schema prefix `"CONCORD"."PUB"."table"` observed in user's M queries; for ODBC DSN connections `PUB."table"` is sufficient (DSN binds to the catalog).
 
-Key table roles:
-- `gl-master` — current fiscal year COA (keyed on `fiscal-year`; join key `"account-fmtd"`)
-- `gl-mstr` — historical fiscal year COA (keyed on `fisc-yr`; join key `"acct-fmtd"`; has `"gl-acc1"`..`"gl-acc9"` segment FKs)
-- `gl-act-prds` — **actual amounts by period** (the trial balance source — do NOT use the packed `prds` varchar in `gl-master`)
+Key table roles (confirmed by user):
+- `gl-mstr` — **THE** GL account master / COA listing and account properties (gl-master is empty; use gl-mstr for everything)
+- `gl-act-prds` — **actual amounts by period** (the trial balance source; `rec-type='P'` for posted actuals)
 - `gl-bud` — budget amounts by period (original, provisional, transfers, finals stored as separate `rec-type` rows)
-- `gl-trn` — primary GL transaction table (newer schema with segment FKs, `fisc-prd`, `fisc-yr`)
-- `gl-transaction` — older transaction table (legacy; single `account` numeric FK, `period` numeric)
+- `gl-trn` — GL transaction detail (segment FKs `gl-acc1`..`gl-acc10`; `object-str` = formatted account string)
+- `wm-master` — work order detail (grants, managerial reporting; `gl-acc1`..`gl-acc10` segment FKs)
+- `gl-seg1`..`gl-seg10` — account segment description tables (confirmed; join key and description field TBC — user to provide)
 - `gl-prds` — fiscal period calendar (`fisc-yr` + `prd` + `date-from` + `date-thru` + `status-flag`)
-- `gl-dept` / `gl-fund` — segment lookup tables (just `c-code` + `descr`)
-- `gl-seg1`..`gl-seg9` — account segment descriptions (just `x-code` + `descr`)
-- `fa-hdr` — financial fixed assets (TCA schedule); use this for PSAB PS 3150
-- `fa-master` — fleet/work management assets (different module; not relevant for financial reporting)
+- `gl-transaction` — older transaction table (legacy; do not use)
+- `fa-hdr` — financial fixed assets (TCA schedule) — **empty at surveyed installation**; TCA source TBD
 
 **Pre-built AMAIS queries:**
 
 ```sql
--- 1. CHART OF ACCOUNTS (current fiscal year)
+-- 1. CHART OF ACCOUNTS
 -- Populate internal COA on first setup; user then assigns PSAB categories
+-- Column names in gl-mstr TBC — user to confirm exact field names
+-- (account identifier, description, acct-type, fund/dept keys, capital flag)
 SELECT
-    m."account-fmtd"    AS acct_fmtd,
-    m."dept-code"       AS dept_code,
-    m."fund-code"       AS fund_code,
-    m."object-no"       AS object_no,
-    m."project-no"      AS project_no,
-    m."acct-type"       AS acct_type,       -- R/E/A/L/Q (TBC)
-    m."record-class"    AS record_class,
-    m.description       AS description,
-    m."capital-acct"    AS capital_acct,
-    m."total-level"     AS total_level,
-    d.descr             AS dept_descr,
-    f.descr             AS fund_descr
-FROM PUB."gl-master" m
-LEFT JOIN PUB."gl-dept" d ON m."dept-code" = d."c-code"
-LEFT JOIN PUB."gl-fund" f ON m."fund-code" = f."c-code"
-WHERE m."fiscal-year" = {fiscal_year}
-ORDER BY m."account-fmtd"
+    m."object-str"      AS acct_fmtd,       -- TBC: confirm formatted account field name
+    m."gl-acc1"         AS seg1,             -- segment 1 code (fund? dept? TBC)
+    m."gl-acc2"         AS seg2,
+    m."gl-acc3"         AS seg3,
+    m.description       AS description,      -- TBC: confirm description field name
+    m."acct-type"       AS acct_type,        -- TBC: confirm field exists and values
+    m."capital-acct"    AS capital_acct      -- TBC: confirm field name
+FROM PUB."gl-mstr" m
+ORDER BY m."object-str"
+-- NOTE: joins to gl-seg# for segment descriptions to be added once field names confirmed
 ```
 
 ```sql
@@ -282,20 +276,20 @@ ORDER BY m."account-fmtd"
 -- Primary source for working trial balance and financial statements
 -- rec-type 'P' = Posted actuals (confirmed); B1-B7=budget versions; BP=budget provisional;
 -- C1/C2/C3/C7=comparative/cumulative (meaning TBC — pull all and let user configure)
+-- JOIN to gl-mstr: join key field names in gl-act-prds and gl-mstr TBC (user to confirm)
 SELECT
-    p."acct-fmtd"       AS acct_fmtd,
+    p."acct-fmtd"       AS acct_fmtd,       -- TBC: confirm field name in gl-act-prds
     p."fisc-yr"         AS fisc_yr,
     p."fisc-prd"        AS fisc_prd,
     p."rec-type"        AS rec_type,
     p.amount            AS amount,
-    m.description       AS description,
-    m."dept-code"       AS dept_code,
-    m."fund-code"       AS fund_code,
-    m."capital-acct"    AS capital_acct
+    m.description       AS description,      -- TBC: confirm field name in gl-mstr
+    m."dept-code"       AS dept_code,        -- TBC: confirm field name in gl-mstr
+    m."fund-code"       AS fund_code,        -- TBC: confirm field name in gl-mstr
+    m."capital-acct"    AS capital_acct      -- TBC: confirm field name in gl-mstr
 FROM PUB."gl-act-prds" p
-LEFT JOIN PUB."gl-master" m
-    ON p."acct-fmtd" = m."account-fmtd"
-    AND m."fiscal-year" = p."fisc-yr"
+LEFT JOIN PUB."gl-mstr" m                   -- gl-master is empty; use gl-mstr
+    ON p."acct-fmtd" = m."object-str"       -- TBC: confirm join keys
 WHERE p."fisc-yr" = {fiscal_year}
   AND p."rec-type" = 'P'   -- P = Posted actuals (confirmed)
 ORDER BY p."acct-fmtd", p."fisc-prd"
@@ -304,24 +298,109 @@ ORDER BY p."acct-fmtd", p."fisc-prd"
 ```sql
 -- 3. GL TRANSACTION DETAIL
 -- Line-level drill-down for supporting schedules and leadsheets
+-- Column list confirmed from user's live Power Query. SUBSTR(descr1,1,255) because
+-- descr1 is a wide field that truncates in some ODBC drivers.
+-- object-str is the formatted account string (equivalent to acct-fmtd in other tables).
+-- gl-acc1..gl-acc10 are individual segment codes joining to gl-seg1..gl-seg10.
 SELECT
-    t."acct-fmtd"       AS acct_fmtd,
-    t."fisc-yr"         AS fisc_yr,
-    t."fisc-prd"        AS fisc_prd,
-    t."primary-date"    AS trans_date,
-    t.amount            AS amount,
-    t.descr1            AS description1,
-    t.descr2            AS description2,
-    t."ref-no"          AS reference_no,
-    t."je-batch-no"     AS je_batch_no,
-    t."sl-code"         AS sl_code,
-    t."inv-no"          AS inv_no,
-    t."po-no"           AS po_no,
-    t."work-order"      AS work_order
+    t."object-str"          AS acct_fmtd,
+    t."fisc-yr"             AS fisc_yr,
+    t."fisc-prd"            AS fisc_prd,
+    t."primary-date"        AS trans_date,
+    t."second-date"         AS second_date,
+    t.amount                AS amount,
+    SUBSTR(t.descr1, 1, 255) AS description1,
+    t.descr2                AS description2,
+    t."ref-no"              AS reference_no,
+    t."je-batch-no"         AS je_batch_no,
+    t."je-dtl-id"           AS je_dtl_id,
+    t."sl-code"             AS sl_code,
+    t."sl-account-no"       AS sl_account_no,
+    t."inv-no"              AS inv_no,
+    t."po-no"               AS po_no,
+    t."work-order"          AS work_order,
+    t."work-id"             AS work_id,
+    t."job-no"              AS job_no,
+    t."asset-no"            AS asset_no,
+    t."veh-no"              AS veh_no,
+    t."emp-no"              AS emp_no,
+    t."usr-id"              AS usr_id,
+    t.location              AS location,
+    t.recovery              AS recovery,
+    t.archival              AS archival,
+    t."gl-acc1"             AS seg1,
+    t."gl-acc2"             AS seg2,
+    t."gl-acc3"             AS seg3,
+    t."gl-acc4"             AS seg4,
+    t."gl-acc5"             AS seg5,
+    t."gl-acc6"             AS seg6,
+    t."gl-acc7"             AS seg7,
+    t."gl-acc8"             AS seg8,
+    t."gl-acc9"             AS seg9,
+    t."gl-acc10"            AS seg10
 FROM PUB."gl-trn" t
 WHERE t."fisc-yr" = {fiscal_year}
   AND t."fisc-prd" BETWEEN {period_from} AND {period_to}
-ORDER BY t."acct-fmtd", t."primary-date"
+ORDER BY t."object-str", t."primary-date"
+```
+
+```sql
+-- 3b. WORK ORDER DETAIL (for grant reporting and managerial schedules)
+-- wm-master is the AMAIS work/service order module.
+-- gl-acc1..gl-acc10 match gl-trn segments; project-str is the formatted project string.
+-- SUBSTR(details,1,255) because details is a wide/CLOB field.
+SELECT
+    w."work-order"              AS work_order,
+    w."wm-master-id"            AS wm_master_id,
+    w.description               AS description,
+    w."work-desc"               AS work_desc,
+    w."work-assign-desc"        AS work_assign_desc,
+    SUBSTR(w.details, 1, 255)   AS details,
+    w."project-str"             AS project_str,
+    w."project-no"              AS project_no,
+    w."fiscal-year"             AS fiscal_year,
+    w."budget-year"             AS budget_year,
+    w."budget-cycle"            AS budget_cycle,
+    w."date-work-order"         AS date_work_order,
+    w."date-exp-complete"       AS date_exp_complete,
+    w."date-act-complete"       AS date_act_complete,
+    w."wm-status"               AS wm_status,
+    w."rec-type"                AS rec_type,
+    w."activity-code"           AS activity_code,
+    w.active                    AS active,
+    w."on_hold"                 AS on_hold,
+    w."wm-cost"                 AS wm_cost,
+    w."accomp-exp"              AS accomp_exp,
+    w."accomp-act"              AS accomp_act,
+    w.account                   AS account,
+    w."customer-no"             AS customer_no,
+    w.billable                  AS billable,
+    w."ref-no"                  AS ref_no,
+    w.prov                      AS prov,
+    w."response-code"           AS response_code,
+    w."time-work-order"         AS time_work_order,
+    w."super-comm"              AS super_comm,
+    w."comp-comm"               AS comp_comm,
+    w."asset-no"                AS asset_no,
+    w."area-str-locate"         AS area_str_locate,
+    w."work-house"              AS work_house,
+    w."work-street"             AS work_street,
+    w."work-suite"              AS work_suite,
+    w."work-phone"              AS work_phone,
+    w.unit                      AS unit,
+    w."gl-acc1"                 AS seg1,
+    w."gl-acc2"                 AS seg2,
+    w."gl-acc3"                 AS seg3,
+    w."gl-acc4"                 AS seg4,
+    w."gl-acc5"                 AS seg5,
+    w."gl-acc6"                 AS seg6,
+    w."gl-acc7"                 AS seg7,
+    w."gl-acc8"                 AS seg8,
+    w."gl-acc9"                 AS seg9,
+    w."gl-acc10"                AS seg10
+FROM PUB."wm-master" w
+WHERE w."fiscal-year" = {fiscal_year}
+ORDER BY w."work-order"
 ```
 
 ```sql
@@ -338,9 +417,8 @@ SELECT
     b.amount            AS amount,
     m.description       AS description
 FROM PUB."gl-bud" b
-LEFT JOIN PUB."gl-master" m
-    ON b."acct-fmtd" = m."account-fmtd"
-    AND m."fiscal-year" = b."fisc-yr"
+LEFT JOIN PUB."gl-mstr" m                   -- gl-master is empty; use gl-mstr
+    ON b."acct-fmtd" = m."object-str"       -- TBC: confirm join keys
 WHERE b."fisc-yr" = {fiscal_year}
 ORDER BY b."acct-fmtd", b."fisc-prd", b."rec-type"
 ```
@@ -438,10 +516,13 @@ ORDER BY h."asset-class", h."asset-no"
 - `ap-inv.stat`: `P`=Paid, `V`=Void, `H`=Hold, `S`=Selected for payment run, `U`=Unposted, blank=Open
 - `gl-act-prds.rec-type`: `P`=Posted actuals; `B1`–`B7`=budget versions 1–7; `BP`=budget provisional; `C1`/`C2`/`C3`/`C7`=comparative/cumulative (meaning TBC)
 
-**Still pending:**
-- `gl-master."acct-type"` is empty in surveyed installation — try `SELECT DISTINCT "acct-type" FROM PUB."gl-mstr"` for historical table. Account type may need to be inferred from account number range or object-no range instead.
-- `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above). Ask during onboarding which module they use for asset tracking.
-- Budget rec-type: which version (`B1`–`B7` or `BP`) represents the **approved/final budget** used in PSAB Statement of Operations comparison column? Pending user confirmation.
+**Still pending — user to provide column names:**
+- `gl-mstr` exact field names: formatted account key, description, acct-type (and its values), fund/dept segment keys, capital-acct flag
+- `gl-act-prds` join key to `gl-mstr` (is it `acct-fmtd` matching `object-str`? Or different?)
+- `gl-bud` structure: account field, period, year, amount, rec-type field names
+- `gl-seg#` tables: exact table names (gl-seg1..gl-seg10?), segment code field, description field, and what each segment number represents (fund, dept, object, project, etc.)
+- Budget rec-type: which version (`B1`–`B7` or `BP`) is the **approved/final budget** for PSAB Statement of Operations comparison column
+- `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above)
 
 The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
 
