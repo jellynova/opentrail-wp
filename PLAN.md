@@ -255,43 +255,102 @@ Key table roles (confirmed by user):
 
 ```sql
 -- 1. CHART OF ACCOUNTS
--- Populate internal COA on first setup; user then assigns PSAB categories
--- Column names in gl-mstr TBC — user to confirm exact field names
--- (account identifier, description, acct-type, fund/dept keys, capital flag)
+-- Populate internal COA on first setup; user then assigns PSAB categories.
+-- All field names confirmed via SYSCOLUMNS.
+-- acct-fmtd = full formatted account key (varchar 30); consistent across gl-mstr/gl-act-prds/gl-bud.
+-- object-str (varchar 80) and project-str (varchar 80) are segment-level display strings, not the PK.
+-- total-lvl / total-lvl-cde drive the COA hierarchy for financial statement subtotalling.
+-- acct-type values: TBC (run diagnostic below); record-class values: TBC.
+-- gl-seg# join: gl-acc1..gl-acc10 (numeric) = x-code (numeric) in gl-seg1..gl-seg10.
+-- Segment-to-meaning mapping (fund/dept/object/project/etc.) TBC — user to confirm.
 SELECT
-    m."object-str"      AS acct_fmtd,       -- TBC: confirm formatted account field name
-    m."gl-acc1"         AS seg1,             -- segment 1 code (fund? dept? TBC)
+    m."acct-fmtd"       AS acct_fmtd,
+    m."fisc-yr"         AS fisc_yr,
+    m.descr             AS description,
+    m."acct-type"       AS acct_type,
+    m."record-class"    AS record_class,
+    m."capital-acct"    AS capital_acct,
+    m."dept-code"       AS dept_code,
+    m."fund-code"       AS fund_code,
+    m.stat              AS stat,
+    m."total-lvl"       AS total_lvl,
+    m."total-lvl-cde"   AS total_lvl_cde,
+    m."rev-exp-rpt"     AS rev_exp_rpt,
+    m."object-str"      AS object_str,
+    m."project-str"     AS project_str,
+    m."gl-acc1"         AS seg1,
     m."gl-acc2"         AS seg2,
     m."gl-acc3"         AS seg3,
-    m.description       AS description,      -- TBC: confirm description field name
-    m."acct-type"       AS acct_type,        -- TBC: confirm field exists and values
-    m."capital-acct"    AS capital_acct      -- TBC: confirm field name
+    m."gl-acc4"         AS seg4,
+    m."gl-acc5"         AS seg5,
+    m."gl-acc6"         AS seg6,
+    m."gl-acc7"         AS seg7,
+    m."gl-acc8"         AS seg8,
+    m."gl-acc9"         AS seg9,
+    m."gl-acc10"        AS seg10,
+    s1.descr            AS seg1_descr,
+    s2.descr            AS seg2_descr,
+    s3.descr            AS seg3_descr,
+    s4.descr            AS seg4_descr,
+    s5.descr            AS seg5_descr,
+    s6.descr            AS seg6_descr,
+    s7.descr            AS seg7_descr,
+    s8.descr            AS seg8_descr,
+    s9.descr            AS seg9_descr,
+    s10.descr           AS seg10_descr
 FROM PUB."gl-mstr" m
-ORDER BY m."object-str"
--- NOTE: joins to gl-seg# for segment descriptions to be added once field names confirmed
+LEFT JOIN PUB."gl-seg1"  s1  ON m."gl-acc1"  = s1."x-code"
+LEFT JOIN PUB."gl-seg2"  s2  ON m."gl-acc2"  = s2."x-code"
+LEFT JOIN PUB."gl-seg3"  s3  ON m."gl-acc3"  = s3."x-code"
+LEFT JOIN PUB."gl-seg4"  s4  ON m."gl-acc4"  = s4."x-code"
+LEFT JOIN PUB."gl-seg5"  s5  ON m."gl-acc5"  = s5."x-code"
+LEFT JOIN PUB."gl-seg6"  s6  ON m."gl-acc6"  = s6."x-code"
+LEFT JOIN PUB."gl-seg7"  s7  ON m."gl-acc7"  = s7."x-code"
+LEFT JOIN PUB."gl-seg8"  s8  ON m."gl-acc8"  = s8."x-code"
+LEFT JOIN PUB."gl-seg9"  s9  ON m."gl-acc9"  = s9."x-code"
+LEFT JOIN PUB."gl-seg10" s10 ON m."gl-acc10" = s10."x-code"
+WHERE m."fisc-yr" = {fiscal_year}
+ORDER BY m."acct-fmtd"
+```
+
+```sql
+-- 1b. DIAGNOSTIC: distinct acct-type / record-class / stat values
+-- Run once during setup to understand COA classification scheme.
+-- Results inform how OpenTrail maps acct-type to PSAB categories.
+SELECT DISTINCT "acct-type", "record-class", stat
+FROM PUB."gl-mstr"
+ORDER BY "acct-type", "record-class"
 ```
 
 ```sql
 -- 2. TRIAL BALANCE BY PERIOD
--- Primary source for working trial balance and financial statements
--- rec-type 'P' = Posted actuals (confirmed); B1-B7=budget versions; BP=budget provisional;
--- C1/C2/C3/C7=comparative/cumulative (meaning TBC — pull all and let user configure)
--- JOIN to gl-mstr: join key field names in gl-act-prds and gl-mstr TBC (user to confirm)
+-- Primary source for working trial balance and financial statements.
+-- All field names confirmed via SYSCOLUMNS.
+-- JOIN key: gl-act-prds.acct-fmtd = gl-mstr.acct-fmtd (both varchar 30 — confirmed consistent).
+-- Also join on fisc-yr so we get the correct COA year's description/type/flags.
+-- rec-type 'P' = Posted actuals; pull all rec-types and let user configure which to surface.
+-- gl-trn.object-str vs gl-mstr.acct-fmtd join TBC — very likely same value, different field names.
 SELECT
-    p."acct-fmtd"       AS acct_fmtd,       -- TBC: confirm field name in gl-act-prds
+    p."acct-fmtd"       AS acct_fmtd,
     p."fisc-yr"         AS fisc_yr,
     p."fisc-prd"        AS fisc_prd,
     p."rec-type"        AS rec_type,
     p.amount            AS amount,
-    m.description       AS description,      -- TBC: confirm field name in gl-mstr
-    m."dept-code"       AS dept_code,        -- TBC: confirm field name in gl-mstr
-    m."fund-code"       AS fund_code,        -- TBC: confirm field name in gl-mstr
-    m."capital-acct"    AS capital_acct      -- TBC: confirm field name in gl-mstr
+    p.remarks           AS remarks,
+    m.descr             AS description,
+    m."acct-type"       AS acct_type,
+    m."record-class"    AS record_class,
+    m."capital-acct"    AS capital_acct,
+    m."dept-code"       AS dept_code,
+    m."fund-code"       AS fund_code,
+    m."total-lvl"       AS total_lvl,
+    m."rev-exp-rpt"     AS rev_exp_rpt
 FROM PUB."gl-act-prds" p
-LEFT JOIN PUB."gl-mstr" m                   -- gl-master is empty; use gl-mstr
-    ON p."acct-fmtd" = m."object-str"       -- TBC: confirm join keys
+LEFT JOIN PUB."gl-mstr" m
+    ON p."acct-fmtd" = m."acct-fmtd"
+    AND m."fisc-yr" = p."fisc-yr"
 WHERE p."fisc-yr" = {fiscal_year}
-  AND p."rec-type" = 'P'   -- P = Posted actuals (confirmed)
+  AND p."rec-type" = 'P'
 ORDER BY p."acct-fmtd", p."fisc-prd"
 ```
 
@@ -405,20 +464,26 @@ ORDER BY w."work-order"
 
 ```sql
 -- 4. BUDGET BY PERIOD
--- gl-bud stores budget amounts; rec-type in gl-act-prds includes B1-B7 (budget versions),
--- BP (budget provisional). The "approved budget" rec-type for comparison column is TBC —
--- pending user confirmation of which version (B1=original? B7=final amended?) to use.
--- For now pull all from gl-bud and surface rec-type to user for configuration.
+-- gl-bud structure mirrors gl-act-prds exactly (same acct-fmtd/fisc-yr/fisc-prd/rec-type/amount).
+-- All field names confirmed via SYSCOLUMNS.
+-- rec-type values in gl-bud: meaning TBC — pull all and surface rec-type to user for configuration.
+-- Approved budget rec-type (for PSAB Statement of Operations comparison column): TBC.
 SELECT
     b."acct-fmtd"       AS acct_fmtd,
     b."fisc-yr"         AS fisc_yr,
     b."fisc-prd"        AS fisc_prd,
     b."rec-type"        AS rec_type,
     b.amount            AS amount,
-    m.description       AS description
+    b."line-no"         AS line_no,
+    b.remarks           AS remarks,
+    b."date-created"    AS date_created,
+    b."usr-id"          AS usr_id,
+    m.descr             AS description,
+    m."acct-type"       AS acct_type
 FROM PUB."gl-bud" b
-LEFT JOIN PUB."gl-mstr" m                   -- gl-master is empty; use gl-mstr
-    ON b."acct-fmtd" = m."object-str"       -- TBC: confirm join keys
+LEFT JOIN PUB."gl-mstr" m
+    ON b."acct-fmtd" = m."acct-fmtd"
+    AND m."fisc-yr" = b."fisc-yr"
 WHERE b."fisc-yr" = {fiscal_year}
 ORDER BY b."acct-fmtd", b."fisc-prd", b."rec-type"
 ```
@@ -516,12 +581,17 @@ ORDER BY h."asset-class", h."asset-no"
 - `ap-inv.stat`: `P`=Paid, `V`=Void, `H`=Hold, `S`=Selected for payment run, `U`=Unposted, blank=Open
 - `gl-act-prds.rec-type`: `P`=Posted actuals; `B1`–`B7`=budget versions 1–7; `BP`=budget provisional; `C1`/`C2`/`C3`/`C7`=comparative/cumulative (meaning TBC)
 
-**Still pending — user to provide column names:**
-- `gl-mstr` exact field names: formatted account key, description, acct-type (and its values), fund/dept segment keys, capital-acct flag
-- `gl-act-prds` join key to `gl-mstr` (is it `acct-fmtd` matching `object-str`? Or different?)
-- `gl-bud` structure: account field, period, year, amount, rec-type field names
-- `gl-seg#` tables: exact table names (gl-seg1..gl-seg10?), segment code field, description field, and what each segment number represents (fund, dept, object, project, etc.)
-- Budget rec-type: which version (`B1`–`B7` or `BP`) is the **approved/final budget** for PSAB Statement of Operations comparison column
+**Confirmed via SYSCOLUMNS introspection:**
+- `gl-mstr`: join key = `acct-fmtd` (varchar 30); description = `descr`; `acct-type`, `record-class`, `capital-acct`, `dept-code`, `fund-code`, `stat`, `total-lvl`, `total-lvl-cde`, `rev-exp-rpt`, `object-str`, `project-str` all present
+- `gl-act-prds`: join key = `acct-fmtd` (varchar 30) — matches gl-mstr exactly; also has `remarks`
+- `gl-bud`: identical structure to gl-act-prds; adds `line-no`, `date-created`, `usr-id`, `remarks`
+- `gl-seg1`..`gl-seg10`: all present; join key = `x-code` (numeric 15) → `gl-acc1`..`gl-acc10`; description = `descr`
+- `gl-trn.object-str` vs `gl-mstr.acct-fmtd`: very likely the same value (different field names); join needed in transaction detail drill-down
+
+**Still pending:**
+- `acct-type` and `record-class` distinct values — run diagnostic query 1b to populate; needed to configure PSAB category mapping
+- Which `gl-seg#` = fund, dept, object/GL account, project — user to confirm (drives COA template column labels)
+- Budget `rec-type`: which value is the **approved/final budget** for PSAB Statement of Operations comparison column
 - `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above)
 
 The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
