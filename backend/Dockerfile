@@ -24,4 +24,6 @@ COPY . .
 # Create documents directory
 RUN mkdir -p /app/documents
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]

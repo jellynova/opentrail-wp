@@ -1,7 +1,12 @@
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.database import Base, engine, SessionLocal
+from app.core.security import hash_password
 from app.api.v1 import (
     auth,
     users,
@@ -15,7 +20,37 @@ from app.api.v1 import (
     connectors,
 )
 
+
+def _init_db() -> None:
+    """Create all tables and seed a default admin user if the users table is empty."""
+    import app.models  # noqa: F401 — ensures all models are registered with Base.metadata
+    Base.metadata.create_all(bind=engine)
+
+    db = SessionLocal()
+    try:
+        from app.models.user import User
+        from sqlalchemy import select
+        if not db.scalars(select(User)).first():
+            db.add(User(
+                username="admin",
+                email="admin@opentrail.local",
+                hashed_password=hash_password("admin123"),
+                role="finance_admin",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+            ))
+            db.commit()
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _init_db()
+    yield
+
 app = FastAPI(
+    lifespan=lifespan,
     title="OpenTrail WP",
     description="BC Municipal Government Financial Reporting & Working Paper System",
     version="0.1.0",
