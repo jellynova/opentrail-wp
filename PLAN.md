@@ -610,11 +610,11 @@ ORDER BY h."asset-class", h."asset-no"
 - `gl-seg1`..`gl-seg10`: all present; join key = `x-code` (numeric 15) → `gl-acc1`..`gl-acc10`; description = `descr`
 - `gl-trn.object-str` vs `gl-mstr.acct-fmtd`: very likely the same value (different field names); join needed in transaction detail drill-down
 
-**Still pending:**
-- `acct-type` and `record-class` distinct values — run diagnostic query 1b; informs default PSAB classification suggestions during setup
-- Budget `rec-type`: which value is the **approved/final budget** for the PSAB Statement of Operations comparison column (client-configurable in the app, but useful to pre-populate)
-- `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above)
-- Segment-to-meaning mapping is **not a pending question** — it is intentionally client-configurable per installation
+**Resolved at runtime, not design time:**
+- `acct-type` and `record-class` values — surfaced by diagnostic query 1b during client setup; used to suggest default PSAB classifications in the mapping scheme UI
+- Budget `rec-type` for approved budget — user selects it in the connector configuration UI when setting up their budget comparison column; no hardcoded default needed
+- Segment labels — user assigns them during setup step 4 above; not a design question
+- `fa-hdr` is empty at the reference installation — TCA will use CSV import or manual entry for this client; other clients using the AMAIS FA module will use query 8 as-is
 
 The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
 
