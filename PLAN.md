@@ -42,7 +42,9 @@ opentrail-wp/
 │   │   ├── models/            # SQLAlchemy ORM models
 │   │   │   ├── user.py
 │   │   │   ├── period.py
-│   │   │   ├── account.py
+│   │   │   ├── account.py         # Account, AccountMapping
+│   │   │   ├── segment.py         # SegmentDefinition
+│   │   │   ├── mapping.py         # MappingScheme, AccountClassification
 │   │   │   ├── trial_balance.py
 │   │   │   ├── journal_entry.py
 │   │   │   ├── document.py
@@ -135,38 +137,57 @@ Roll-forward: closing a fiscal year copies account mappings and document structu
 
 ### 2.1 Chart of Accounts & Mapping
 
-The internal COA exists to provide PSAB category groupings for financial statement generation. It does **not** replace or duplicate the ERP's own COA — it layers PSAB structure on top.
+The internal COA exists to layer classification structure on top of the ERP's own account data. It does **not** replace the ERP COA — it adds dimensions that drive financial statement generation, reporting groupings, and working paper templates.
 
 **COA population strategy (in priority order):**
-1. **Import from AMAIS connector** — when a MAIS connector is configured, the MAIS COA (account codes, descriptions, existing cost centre / function mappings) is read directly via the connector and imported as the base COA. This is the expected path for MAIS users.
-2. **Import from VADIM connector** — same approach for VADIM installations.
-3. **CSV/Excel import** — for initial setup without a live connector, or to supplement.
+1. **Import from AMAIS connector** — pulls all 10 segment codes/descriptions plus account properties. This is the expected path for AMAIS users.
+2. **Import from VADIM connector** — same approach.
+3. **CSV/Excel import** — fallback for clients without a live connector, or to supplement.
 4. **Manual entry** — available but not the expected workflow.
 
-Once the source COA is imported, the finance admin assigns each account (or account range/group) to a PSAB category. This mapping is saved and reused across periods; it only needs updating when new accounts are added in the ERP.
+**Segment definitions are client-configurable.** AMAIS exposes up to 10 GL segments (`gl-acc1`..`gl-acc10`) whose meaning varies by installation — one client's seg1 is "fund", another's is "department". OpenTrail imports all segments generically and lets the `finance_admin` assign labels during setup. The labels drive column headings in the COA view and filter options in reports.
+
+**Mapping schemes are flexible and user-defined.** Rather than hardcoding "PSAB categories" as fixed columns, OpenTrail supports named mapping schemes — a scheme is a named classification system (e.g. "PSAB", "Management Report", "Audit File") that assigns each account to a value within that scheme. A client can have multiple schemes simultaneously. PSAB is a first-class scheme but not the only one.
+
+**Template generation is downstream.** Templates (Statement of Operations, Statement of Financial Position, etc.) are generated *from* the mapping scheme configuration, not embedded in the app. The workflow is: import COA → configure segment labels → build mapping schemes → export scheme as a structured spec → Claude generates the template structure → template is loaded into the report engine. This means OpenTrail's report engine is generic; the client-specific shape lives in the mapping scheme.
 
 **Models:**
 ```
-AccountGroup: id, fiscal_year_id, group_code, description, psab_category
-  (PSAB categories: financial_assets, liabilities, non_financial_assets,
-   revenue, expense, accumulated_surplus)
+SegmentDefinition: id, connector_id, segment_number (1–10), label,
+                   description, is_active
+  -- e.g.: seg_number=1, label="Fund", is_active=true
+  -- created/edited by finance_admin during initial setup
+  -- drives column labels in COA view, filter options, and report dimensions
 
-Account: id, fiscal_year_id, gl_code, description, account_group_id,
+MappingScheme: id, org_id, name, description, is_active
+  -- e.g.: name="PSAB", name="Management", name="Audit File"
+  -- a client can have multiple schemes; one scheme per report type
+
+AccountClassification: id, account_id, scheme_id, classification_value, sort_order
+  -- e.g.: account_id=42, scheme_id=1 (PSAB), classification_value="Revenue"
+  -- one row per account per scheme; updated when COA changes
+  -- these rows are what drive financial statement line mapping
+
+Account: id, fiscal_year_id, acct_fmtd, description, acct_type, record_class,
+         capital_acct, dept_code, fund_code, stat,
+         total_lvl, total_lvl_cde, rev_exp_rpt,
+         object_str, project_str,
+         seg1..seg10 (codes), seg1_descr..seg10_descr (descriptions),
          normal_balance (debit/credit), is_active,
-         source_system (mais/vadim/csv/manual),
-         source_cost_centre, source_function  # preserved from ERP for reference
+         source_system (amais/vadim/csv/manual), connector_id
+  -- all ERP fields preserved as-is; classification lives in AccountClassification
 
-AccountMapping: id, account_id, source_system, source_gl_code
+AccountMapping: id, account_id, source_system, source_acct_fmtd
+  -- tracks origin for re-import reconciliation
 ```
 
-**PSAB groupings built-in:**
-- Financial Assets (PS 1201.031)
-- Liabilities (PS 1201.032)
-- Non-Financial Assets (PS 1201.033)
-- Revenue (PS 1201)
-- Expenses (by object and function)
-- Net Financial Assets / Debt (derived)
-- Accumulated Surplus/Deficit (derived)
+**PSAB scheme values (built-in defaults, user can rename/extend):**
+- `financial_assets` — PS 1201.031
+- `liabilities` — PS 1201.032
+- `non_financial_assets` — PS 1201.033
+- `revenue`
+- `expense`
+- `accumulated_surplus` (derived — no direct account mapping needed)
 
 ### 2.2 Trial Balance Data
 
@@ -262,7 +283,8 @@ Key table roles (confirmed by user):
 -- total-lvl / total-lvl-cde drive the COA hierarchy for financial statement subtotalling.
 -- acct-type values: TBC (run diagnostic below); record-class values: TBC.
 -- gl-seg# join: gl-acc1..gl-acc10 (numeric) = x-code (numeric) in gl-seg1..gl-seg10.
--- Segment-to-meaning mapping (fund/dept/object/project/etc.) TBC — user to confirm.
+-- Segment-to-meaning mapping is CLIENT-CONFIGURABLE — seg# assignment differs per installation.
+-- All 10 segments are always imported; finance_admin labels them during setup via SegmentDefinition.
 SELECT
     m."acct-fmtd"       AS acct_fmtd,
     m."fisc-yr"         AS fisc_yr,
@@ -589,10 +611,10 @@ ORDER BY h."asset-class", h."asset-no"
 - `gl-trn.object-str` vs `gl-mstr.acct-fmtd`: very likely the same value (different field names); join needed in transaction detail drill-down
 
 **Still pending:**
-- `acct-type` and `record-class` distinct values — run diagnostic query 1b to populate; needed to configure PSAB category mapping
-- Which `gl-seg#` = fund, dept, object/GL account, project — user to confirm (drives COA template column labels)
-- Budget `rec-type`: which value is the **approved/final budget** for PSAB Statement of Operations comparison column
+- `acct-type` and `record-class` distinct values — run diagnostic query 1b; informs default PSAB classification suggestions during setup
+- Budget `rec-type`: which value is the **approved/final budget** for the PSAB Statement of Operations comparison column (client-configurable in the app, but useful to pre-populate)
 - `fa-hdr` is empty — TCA source for this municipality is TBD (see query 8 note above)
+- Segment-to-meaning mapping is **not a pending question** — it is intentionally client-configurable per installation
 
 The user selects "AMAIS" as the system type, enters host/port/credentials, and all 8 queries execute immediately against the confirmed schema. The Progress OpenEdge ODBC driver must be installed on the OpenTrail WP host server (documented in deployment guide).
 
@@ -608,13 +630,22 @@ VADIM (Tempus Nova) is another BC municipal ERP on SQL Server, also with a consi
 
 ### 3.4 Import Workflow
 
-1. User configures connector (system type, host, credentials, DB name)
-2. "Test Connection" verifies connectivity and schema version
-3. **First-time setup:** "Import COA" pulls account structure from the ERP and populates the internal COA (see 2.1)
-4. User assigns PSAB categories to imported accounts (one-time; saved permanently)
-5. For each period pull: user selects fiscal year and period, system executes queries, previews results
-6. Data written to `TrialBalanceEntry` with `source = connector_id`
-7. Pull history logged with row counts and timestamp
+**First-time setup (one-time per client):**
+1. Configure connector (system type, host, credentials, DB name)
+2. "Test Connection" — verifies connectivity, checks expected tables exist
+3. **Import COA** — pulls account structure, stores all 10 segment codes/descriptions, creates `Account` and `AccountMapping` rows
+4. **Label segments** — `finance_admin` assigns labels to the segments that are in use (e.g. "Fund", "Department", "GL Account", "Project") and marks unused ones inactive
+5. **Define mapping schemes** — create named schemes (at minimum: "PSAB"); assign each account to a classification value within each scheme
+6. **Export mapping scheme** — structured JSON/CSV export of segment labels + account classifications; can be handed to Claude to generate report templates
+7. **Load templates** — generated templates imported into the report engine
+
+**Ongoing period pulls:**
+1. User selects fiscal year and period
+2. System executes queries (trial balance, budget, transactions as configured)
+3. Preview results before commit
+4. Data written to `TrialBalanceEntry` with `source = connector_id`
+5. Pull history logged with row counts and timestamp
+6. Re-import COA if new accounts have been added in the ERP since last pull
 
 ### 3.5 Custom Query Support
 
