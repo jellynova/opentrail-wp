@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Loader2, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
+import { Plus, Loader2, ChevronDown, Trash2 } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { Button } from '@/components/ui/button'
@@ -10,14 +10,11 @@ import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
 import { useAllJournalEntries, useJournalEntry, useCreateJournalEntry, usePostJournalEntry, useApproveJournalEntry } from '@/hooks/useJournalEntries'
-import { useAccounts } from '@/hooks/useAccounts'
 import { formatDate, formatCurrency } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
 import { toast } from '@/hooks/useToast'
-import type { JournalEntry } from '@/types'
 
 type EntryType = 'adjusting' | 'reclassifying' | 'elimination' | 'budget_variance'
 
@@ -552,5 +549,3 @@ export function JournalEntriesPage() {
   )
 }
 
-// Suppress unused import
-void useAccounts

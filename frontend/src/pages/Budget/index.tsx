@@ -159,7 +159,7 @@ export function BudgetPage() {
     department: filterDept !== 'all' ? filterDept : undefined,
   })
 
-  const { user, hasRole } = useAuthStore()
+  const { hasRole } = useAuthStore()
 
   // Derive departments from requests for filter
   const departments = Array.from(new Set((requests ?? []).map((r) => r.department))).sort()
@@ -420,5 +420,3 @@ export function BudgetPage() {
   )
 }
 
-// Suppress unused
-void user

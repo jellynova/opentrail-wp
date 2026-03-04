@@ -8,7 +8,7 @@ import { PageHeader } from '@/components/shared/PageHeader'
 import { useFiscalYears } from '@/hooks/useFiscalYears'
 import { useAllJournalEntries } from '@/hooks/useJournalEntries'
 import { useBudgetYears } from '@/hooks/useBudget'
-import { formatDate, formatCurrency } from '@/lib/utils'
+import { formatDate } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
 
 function FiscalYearStatusBadge({ status }: { status: string }) {
@@ -242,5 +242,3 @@ export function DashboardPage() {
   )
 }
 
-// Suppress unused import warning — formatCurrency imported for potential future use
-void formatCurrency
