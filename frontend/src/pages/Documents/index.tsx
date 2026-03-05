@@ -19,7 +19,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import api from '@/lib/api'
-import { formatDate, formatFileSize, formatDateTime } from '@/lib/utils'
+import { formatFileSize, formatDateTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
 import type { WorkingPaper } from '@/types'
 
