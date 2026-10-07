@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = ["http://localhost", "http://localhost:3000", "http://localhost:5173"]
     DOCUMENTS_PATH: str = "/app/documents"
     DEBUG: bool = False
+    # Journal entry balance enforcement on posting: "block" rejects unbalanced entries,
+    # "warn" allows them (the response's is_balanced flag reports the imbalance).
+    JE_BALANCE_ENFORCEMENT: str = "block"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

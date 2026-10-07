@@ -1,7 +1,9 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Literal, Optional, List
+from pydantic import BaseModel, computed_field, model_validator
+
+EntryType = Literal["adjusting", "reclassifying", "elimination", "budget_variance"]
 
 
 class JournalLineCreate(BaseModel):
@@ -10,6 +12,16 @@ class JournalLineCreate(BaseModel):
     credit: Decimal = Decimal("0")
     description: Optional[str] = None
     gl_reference: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_sided_positive(self):
+        if self.debit < 0 or self.credit < 0:
+            raise ValueError("debit and credit must not be negative")
+        if self.debit > 0 and self.credit > 0:
+            raise ValueError("a line may have a debit or a credit, not both")
+        if self.debit == 0 and self.credit == 0:
+            raise ValueError("a line must have a non-zero debit or credit")
+        return self
 
 
 class JournalLineResponse(BaseModel):
@@ -27,9 +39,9 @@ class JournalLineResponse(BaseModel):
 class JournalEntryCreate(BaseModel):
     period_id: int
     entry_date: date
-    reference: Optional[str] = None
+    reference: Optional[str] = None  # auto-numbered (AJE-001, RJE-001, ...) when omitted
     description: Optional[str] = None
-    entry_type: str  # adjusting / reclassifying / elimination / budget_variance
+    entry_type: EntryType
     lines: List[JournalLineCreate]
 
 
@@ -37,7 +49,7 @@ class JournalEntryUpdate(BaseModel):
     entry_date: Optional[date] = None
     reference: Optional[str] = None
     description: Optional[str] = None
-    entry_type: Optional[str] = None
+    entry_type: Optional[EntryType] = None
     lines: Optional[List[JournalLineCreate]] = None
 
 
@@ -55,3 +67,18 @@ class JournalEntryResponse(BaseModel):
     lines: List[JournalLineResponse] = []
 
     model_config = {"from_attributes": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_debit(self) -> Decimal:
+        return sum((Decimal(str(l.debit)) for l in self.lines), Decimal("0"))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total_credit(self) -> Decimal:
+        return sum((Decimal(str(l.credit)) for l in self.lines), Decimal("0"))
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_balanced(self) -> bool:
+        return self.total_debit == self.total_credit

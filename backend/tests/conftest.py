@@ -62,6 +62,9 @@ def client(engine) -> TestClient:
     fastapi_app.dependency_overrides.clear()
 
 
+_PW_HASH = hash_password("pw")  # bcrypt is slow; hash once per session
+
+
 @pytest.fixture()
 def users(db) -> Dict[str, User]:
     """One user per role, plus a second finance officer (for segregation-of-duties tests)."""
@@ -78,7 +81,7 @@ def users(db) -> Dict[str, User]:
         u = User(
             username=username,
             email=f"{username}@town.example.ca",
-            hashed_password=hash_password("pw"),
+            hashed_password=_PW_HASH,
             role=role,
             department=dept,
             is_active=True,
