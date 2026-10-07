@@ -99,6 +99,7 @@ def list_journal_entries(
     fiscal_year_id: Optional[int] = Query(None),
     entry_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
+    limit: Optional[int] = Query(None, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -111,6 +112,8 @@ def list_journal_entries(
         stmt = stmt.where(JournalEntry.entry_type == entry_type)
     if status_filter:
         stmt = stmt.where(JournalEntry.status == status_filter)
+    if limit:
+        stmt = stmt.limit(limit)
     return db.scalars(stmt).all()
 
 

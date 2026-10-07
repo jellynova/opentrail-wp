@@ -149,3 +149,4 @@ def test_list_filters(client, auth, setup):
     assert ids(status="posted") == [rje["id"]]
     assert len(ids(fiscal_year_id=setup["fy"].id)) == 2
     assert ids(fiscal_year_id=9999) == []
+    assert len(ids(limit=1)) == 1

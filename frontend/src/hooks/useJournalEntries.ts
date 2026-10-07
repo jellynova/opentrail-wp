@@ -17,6 +17,7 @@ export function useJournalEntries(periodId: number | null) {
 
 export function useAllJournalEntries(params?: {
   period_id?: number
+  fiscal_year_id?: number
   entry_type?: string
   status?: string
   limit?: number
@@ -98,6 +99,31 @@ export function useApproveJournalEntry() {
       void queryClient.invalidateQueries({
         queryKey: ['journal-entries', 'detail', data.id],
       })
+    },
+  })
+}
+
+function useEntryAction(action: 'unpost') {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) =>
+      api.post<JournalEntry>(`/v1/journal-entries/${id}/${action}`).then((r) => r.data),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['journal-entries'] })
+    },
+  })
+}
+
+export function useUnpostJournalEntry() {
+  return useEntryAction('unpost')
+}
+
+export function useDeleteJournalEntry() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.delete(`/v1/journal-entries/${id}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['journal-entries'] })
     },
   })
 }

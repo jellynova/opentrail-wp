@@ -11,8 +11,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
-import { useAllJournalEntries, useJournalEntry, useCreateJournalEntry, usePostJournalEntry, useApproveJournalEntry } from '@/hooks/useJournalEntries'
-import { formatDate, formatCurrency } from '@/lib/utils'
+import {
+  useAllJournalEntries,
+  useJournalEntry,
+  useCreateJournalEntry,
+  usePostJournalEntry,
+  useApproveJournalEntry,
+  useUnpostJournalEntry,
+  useDeleteJournalEntry,
+} from '@/hooks/useJournalEntries'
+import { useAccounts } from '@/hooks/useAccounts'
+import { apiErrorMessage, formatDate, formatCurrency } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
 import { toast } from '@/hooks/useToast'
 
@@ -42,18 +51,49 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge variant={variants[status] ?? 'secondary'}>{status}</Badge>
 }
 
-function EntryDetailPanel({ entryId, onClose }: { entryId: number; onClose: () => void }) {
+function useAccountLabels(fiscalYearId: number | null) {
+  const { data: accounts } = useAccounts(fiscalYearId ? { fiscal_year_id: fiscalYearId } : undefined)
+  const labels = new Map<number, string>()
+  accounts?.forEach((a) => labels.set(a.id, `${a.acct_fmtd} — ${a.description ?? ''}`))
+  return { accounts: accounts ?? [], labels }
+}
+
+function EntryDetailPanel({
+  entryId,
+  fiscalYearId,
+  onClose,
+}: {
+  entryId: number
+  fiscalYearId: number | null
+  onClose: () => void
+}) {
   const { data: entry, isLoading } = useJournalEntry(entryId)
   const postMutation = usePostJournalEntry()
   const approveMutation = useApproveJournalEntry()
-  const { hasRole } = useAuthStore()
+  const unpostMutation = useUnpostJournalEntry()
+  const deleteMutation = useDeleteJournalEntry()
+  const { hasRole, user } = useAuthStore()
+  const { labels } = useAccountLabels(fiscalYearId)
 
   if (isLoading) return <LoadingSpinner fullPage />
   if (!entry) return null
 
-  const totalDebit = entry.lines?.reduce((s, l) => s + parseFloat(l.debit || '0'), 0) ?? 0
-  const totalCredit = entry.lines?.reduce((s, l) => s + parseFloat(l.credit || '0'), 0) ?? 0
-  const isBalanced = Math.abs(totalDebit - totalCredit) < 0.005
+  const totalDebit = parseFloat(entry.total_debit ?? '0')
+  const totalCredit = parseFloat(entry.total_credit ?? '0')
+  const isBalanced = entry.is_balanced ?? Math.abs(totalDebit - totalCredit) < 0.005
+  const isFinance = hasRole(['finance_admin', 'finance_officer'])
+  const busy =
+    postMutation.isPending || approveMutation.isPending || unpostMutation.isPending || deleteMutation.isPending
+
+  const run = (mutation: { mutate: (id: number, opts: object) => void }, message: string) =>
+    mutation.mutate(entry.id, {
+      onSuccess: () => {
+        toast({ title: message })
+        onClose()
+      },
+      onError: (err: unknown) =>
+        toast({ title: 'Action failed', description: apiErrorMessage(err), variant: 'destructive' }),
+    })
 
   return (
     <div className="space-y-4">
@@ -80,7 +120,7 @@ function EntryDetailPanel({ entryId, onClose }: { entryId: number; onClose: () =
           {entry.lines?.map((line) => (
             <TableRow key={line.id}>
               <TableCell className="font-mono text-xs">
-                {line.account?.acct_fmtd ?? line.account_id}
+                {labels.get(line.account_id) ?? line.account?.acct_fmtd ?? line.account_id}
               </TableCell>
               <TableCell className="text-xs">{line.description ?? '—'}</TableCell>
               <TableCell className="text-right font-mono text-xs">{formatCurrency(line.debit)}</TableCell>
@@ -102,42 +142,35 @@ function EntryDetailPanel({ entryId, onClose }: { entryId: number; onClose: () =
       )}
 
       <div className="flex gap-2 justify-end">
-        {entry.status === 'draft' && hasRole(['finance_admin', 'finance_officer']) && (
-          <Button
-            size="sm"
-            onClick={() => {
-              postMutation.mutate(entry.id, {
-                onSuccess: () => {
-                  toast({ title: 'Entry posted' })
-                  onClose()
-                },
-              })
-            }}
-            disabled={postMutation.isPending}
-          >
+        {entry.status === 'draft' && isFinance && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => run(deleteMutation, 'Entry deleted')}>
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete
+          </Button>
+        )}
+        {entry.status === 'draft' && isFinance && (
+          <Button size="sm" disabled={busy} onClick={() => run(postMutation, 'Entry posted')}>
             {postMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Post Entry
           </Button>
         )}
-        {entry.status === 'posted' && hasRole(['finance_admin']) && (
-          <Button
-            size="sm"
-            variant="default"
-            onClick={() => {
-              approveMutation.mutate(entry.id, {
-                onSuccess: () => {
-                  toast({ title: 'Entry approved' })
-                  onClose()
-                },
-              })
-            }}
-            disabled={approveMutation.isPending}
-          >
+        {((entry.status === 'posted' && isFinance) || (entry.status === 'approved' && hasRole(['finance_admin']))) && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => run(unpostMutation, 'Entry returned to draft')}>
+            {entry.status === 'approved' ? 'Reopen' : 'Unpost'}
+          </Button>
+        )}
+        {entry.status === 'posted' && isFinance && entry.prepared_by_user_id !== user?.id && (
+          <Button size="sm" disabled={busy} onClick={() => run(approveMutation, 'Entry approved')}>
             {approveMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Approve
           </Button>
         )}
       </div>
+      {entry.status === 'posted' && entry.prepared_by_user_id === user?.id && (
+        <p className="text-xs text-muted-foreground text-right">
+          Another reviewer must approve entries you prepared.
+        </p>
+      )}
     </div>
   )
 }
@@ -146,10 +179,12 @@ function NewEntryDialog({
   open,
   onClose,
   periodId,
+  fiscalYearId,
 }: {
   open: boolean
   onClose: () => void
   periodId: number | null
+  fiscalYearId: number | null
 }) {
   const [entryDate, setEntryDate] = useState(new Date().toISOString().slice(0, 10))
   const [reference, setReference] = useState('')
@@ -161,6 +196,8 @@ function NewEntryDialog({
   ])
 
   const createMutation = useCreateJournalEntry()
+  const postMutation = usePostJournalEntry()
+  const { accounts } = useAccountLabels(fiscalYearId)
 
   const totalDebit = lines.reduce((s, l) => s + parseFloat(l.debit || '0'), 0)
   const totalCredit = lines.reduce((s, l) => s + parseFloat(l.credit || '0'), 0)
@@ -201,12 +238,29 @@ function NewEntryDialog({
         })),
       },
       {
-        onSuccess: () => {
-          toast({ title: postAfter ? 'Entry created and posted' : 'Entry saved as draft' })
-          onClose()
+        onSuccess: (created) => {
+          if (!postAfter) {
+            toast({ title: `Entry ${created.reference ?? ''} saved as draft` })
+            onClose()
+            return
+          }
+          postMutation.mutate(created.id, {
+            onSuccess: () => {
+              toast({ title: `Entry ${created.reference ?? ''} created and posted` })
+              onClose()
+            },
+            onError: (err) => {
+              toast({
+                title: 'Saved as draft, but posting failed',
+                description: apiErrorMessage(err),
+                variant: 'destructive',
+              })
+              onClose()
+            },
+          })
         },
-        onError: () => {
-          toast({ title: 'Error', description: 'Could not save entry.', variant: 'destructive' })
+        onError: (err) => {
+          toast({ title: 'Could not save entry', description: apiErrorMessage(err), variant: 'destructive' })
         },
       }
     )
@@ -237,7 +291,7 @@ function NewEntryDialog({
           </div>
           <div className="space-y-1">
             <Label>Reference</Label>
-            <Input placeholder="e.g. AJE-001" value={reference} onChange={(e) => setReference(e.target.value)} />
+            <Input placeholder="Auto-numbered (AJE-001…)" value={reference} onChange={(e) => setReference(e.target.value)} />
           </div>
           <div className="space-y-1 col-span-2">
             <Label>Description</Label>
@@ -263,7 +317,7 @@ function NewEntryDialog({
             <table className="w-full text-sm">
               <thead className="bg-muted/50">
                 <tr>
-                  <th className="px-3 py-2 text-left font-medium">Account ID</th>
+                  <th className="px-3 py-2 text-left font-medium">Account</th>
                   <th className="px-3 py-2 text-left font-medium">Description</th>
                   <th className="px-3 py-2 text-right font-medium">Debit</th>
                   <th className="px-3 py-2 text-right font-medium">Credit</th>
@@ -274,13 +328,19 @@ function NewEntryDialog({
                 {lines.map((line, i) => (
                   <tr key={i} className="border-t">
                     <td className="px-2 py-1">
-                      <Input
-                        placeholder="Account ID"
+                      <select
+                        aria-label="Account"
                         value={line.account_id}
                         onChange={(e) => updateLine(i, 'account_id', e.target.value)}
-                        className="h-8 w-28"
-                        type="number"
-                      />
+                        className="h-8 w-56 rounded-md border border-input bg-background px-2 text-xs"
+                      >
+                        <option value="">Select account…</option>
+                        {accounts.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.acct_fmtd} — {a.description}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="px-2 py-1">
                       <Input
@@ -356,14 +416,14 @@ function NewEntryDialog({
           <Button
             variant="secondary"
             onClick={() => handleSave(false)}
-            disabled={createMutation.isPending || !isBalanced}
+            disabled={createMutation.isPending}
           >
             {createMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Save Draft
           </Button>
           <Button
             onClick={() => handleSave(true)}
-            disabled={createMutation.isPending || !isBalanced}
+            disabled={createMutation.isPending || postMutation.isPending || !isBalanced}
           >
             {createMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Save &amp; Post
@@ -387,6 +447,7 @@ export function JournalEntriesPage() {
   const { data: periods } = usePeriods(selectedFYId)
   const { data: entries, isLoading } = useAllJournalEntries({
     period_id: selectedPeriodId ?? undefined,
+    fiscal_year_id: selectedFYId ?? undefined,
     entry_type: filterType !== 'all' ? filterType : undefined,
     status: filterStatus !== 'all' ? filterStatus : undefined,
   })
@@ -529,6 +590,7 @@ export function JournalEntriesPage() {
         open={newEntryOpen}
         onClose={() => setNewEntryOpen(false)}
         periodId={selectedPeriodId}
+        fiscalYearId={selectedFYId}
       />
 
       {/* Detail Dialog */}
@@ -540,6 +602,7 @@ export function JournalEntriesPage() {
           {selectedEntryId && (
             <EntryDetailPanel
               entryId={selectedEntryId}
+              fiscalYearId={selectedFYId}
               onClose={() => setDetailOpen(false)}
             />
           )}
