@@ -110,6 +110,9 @@ def test_statement_of_operations(db, ds):
     assert r["Surplus of 200 for 2025."]["values"]["cy"] is None
     assert r["Revenue"]["values"]["cy"] is None  # section header carries no amount
     assert out["warnings"] == []
+    ids = [row["id"] for row in out["rows"]]
+    assert len(ids) == len(set(ids))  # header and total rows of a section get distinct ids
+    assert r["Total revenue"]["id"] == "rev:total" and r["Total revenue"]["source_id"] == "rev"
 
 
 def test_financial_position_ties_to_operations(db, ds):
@@ -222,3 +225,11 @@ def test_exports(db, ds):
     html = report_to_html({**out, "title": "<script>x</script>"})
     assert "<script>x" not in html and "&lt;script&gt;" in html
     assert "(30)" in html  # revenue variance rendered in parentheses
+
+
+def test_safe_filename():
+    from app.services.report_generator import safe_filename
+
+    assert safe_filename("PSAB — Statement of Operations") == "PSAB_Statement_of_Operations"
+    assert safe_filename('../"x"') == "x"
+    assert safe_filename("—") == "report"

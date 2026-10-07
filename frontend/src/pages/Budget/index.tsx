@@ -84,6 +84,9 @@ function StatusDot({ status }: { status: TrafficLight }) {
   )
 }
 
+const compactCurrency = (v: number) =>
+  new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', notation: 'compact', maximumFractionDigits: 1 }).format(v)
+
 function onError(title: string) {
   return (err: unknown) => toast({ title, description: apiErrorMessage(err), variant: 'destructive' })
 }
@@ -296,6 +299,7 @@ function RequestsTab({ budgetYear }: { budgetYear: BudgetYear }) {
   const accountLabel = useMemo(() => new Map(accounts?.map((a) => [a.id, `${a.acct_fmtd} ${a.description ?? ''}`])), [accounts])
   const departments = Array.from(new Set((requests ?? []).map((r) => r.department))).sort()
   const isFinance = hasRole(FINANCE)
+  const reviewOpen = budgetYear.status === 'open' || budgetYear.status === 'under_review'
   const canCreate =
     hasRole(['budget_manager', ...FINANCE]) &&
     (budgetYear.status === 'open' || (budgetYear.status === 'setup' && isFinance))
@@ -428,7 +432,7 @@ function RequestsTab({ budgetYear }: { budgetYear: BudgetYear }) {
                             </Button>
                           </>
                         )}
-                        {req.status === 'submitted' && isFinance && !mine && (
+                        {req.status === 'submitted' && isFinance && !mine && reviewOpen && (
                           <Button size="sm" variant="outline" onClick={() => setReviewing(req)}>
                             Review
                           </Button>
@@ -557,7 +561,7 @@ function VarianceTab({ budgetYear }: { budgetYear: BudgetYear }) {
                     <BarChart data={chartData} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                      <YAxis tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}K`} tick={{ fontSize: 11 }} />
+                      <YAxis tickFormatter={compactCurrency} tick={{ fontSize: 11 }} width={70} />
                       <Tooltip formatter={(value: number) => formatCurrency(value)} />
                       <Legend />
                       <Bar dataKey="budget" name="Budget" fill="hsl(221.2 83.2% 53.3%)" radius={[2, 2, 0, 0]} />

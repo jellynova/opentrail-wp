@@ -576,8 +576,11 @@ class ReportEngine:
             out.append(self._out_row(r, level, vals if t != "text" else None, style, t))
 
     def _out_row(self, r, level, vals, style, kind):
+        # header/total/subtotal rows share their source row's id; suffix them so ids are unique
+        row_id = r["id"] if kind not in ("header", "total", "subtotal") else f"{r['id']}:{kind}"
         return {
-            "id": r["id"],
+            "id": row_id,
+            "source_id": r["id"],
             "type": kind,
             "label": self._tokens(r.get("label", "")),
             "level": level + int((r.get("style") or {}).get("indent", 0)),

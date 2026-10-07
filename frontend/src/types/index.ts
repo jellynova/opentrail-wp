@@ -222,9 +222,33 @@ export interface Report {
   report_type: string
   is_template: boolean
   is_protected: boolean
-  definition: object
+  definition: Record<string, unknown>
   fiscal_year_id: number | null
   created_at: string
+  updated_at?: string
+}
+
+/** Common tabular output of the report engine, working papers, budget and SOFI schedules. */
+export interface ReportOutputRow {
+  id?: string
+  type?: string
+  label: string
+  level: number
+  style: { bold?: boolean; italic?: boolean; underline?: 'single' | 'double' }
+  values: Record<string, string | number | null>
+  text?: Record<string, string>
+  acct_fmtd?: string
+}
+
+export interface ReportOutput {
+  title: string
+  subtitle: string | null
+  organization?: string | null
+  number_format?: { decimals?: number; currency_symbol?: string }
+  columns: { key: string; label: string; percent?: boolean }[]
+  text_columns?: { key: string; label: string }[]
+  rows: ReportOutputRow[]
+  warnings?: string[]
 }
 
 export interface AuthTokens {

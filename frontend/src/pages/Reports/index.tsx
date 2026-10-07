@@ -1,215 +1,611 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { FileText, Download, Play, Plus, Lock, LayoutTemplate } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Copy, Download, FileArchive, FileText, Lock, Play, Plus, RotateCcw, Save, Trash2, Upload } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { ReportView } from '@/components/shared/ReportView'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import api from '@/lib/api'
-import { formatDate } from '@/lib/utils'
-import { useFiscalYears } from '@/hooks/useFiscalYears'
-import type { Report } from '@/types'
+import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
+import {
+  useCloneReport,
+  useDeleteReport,
+  useGenerateReport,
+  useImportSofi,
+  usePreviewReport,
+  useReports,
+  useRevertReport,
+  useSaveReport,
+  useSofiSchedule,
+  useValidateDefinition,
+  type SofiScheduleType,
+} from '@/hooks/useReports'
+import { apiErrorMessage } from '@/lib/utils'
+import { downloadFile } from '@/lib/download'
+import { useAuthStore } from '@/store/auth'
+import { toast } from '@/hooks/useToast'
+import type { Report, ReportOutput } from '@/types'
 
-const builtInTemplates = [
-  { id: 'psab-fs', name: 'PSAB Financial Statements', category: 'PSAB', description: 'Statement of financial position, operations, change in net debt, and cash flows.' },
-  { id: 'lgde-sched', name: 'LGDE Schedules', category: 'LGDE', description: 'Local Government Data Entry schedules for Ministry reporting.' },
-  { id: 'wp-summary', name: 'Working Papers Summary', category: 'Working Papers', description: 'Consolidated working paper binder index and lead schedules.' },
-  { id: 'budget-comparison', name: 'Budget vs Actual', category: 'Management', description: 'Departmental budget vs actual variance report.' },
-  { id: 'tb-detail', name: 'Trial Balance Detail', category: 'Accounting', description: 'Full trial balance with account details and YTD balances.' },
-  { id: 'je-listing', name: 'Journal Entry Listing', category: 'Accounting', description: 'All journal entries for the period with lines.' },
-]
+const FINANCE = ['finance_admin', 'finance_officer']
 
-function GenerateDialog({
-  report,
-  onClose,
+const BLANK_DEFINITION = {
+  version: 2,
+  title: 'New report',
+  subtitle: 'For the year ended {period_end}',
+  scheme: 'PSAB',
+  columns: [
+    { key: 'cy', label: '{fiscal_year}', source: 'actual' },
+    { key: 'py', label: '{prior_fiscal_year}', source: 'actual', year_offset: -1 },
+  ],
+  rows: [
+    {
+      id: 'rev',
+      type: 'section',
+      label: 'Revenue',
+      total_label: 'Total revenue',
+      children: [{ type: 'accounts', label: 'Revenue', classifications: ['revenue*'], sign: -1, show_detail: true }],
+    },
+  ],
+}
+
+function onError(title: string) {
+  return (err: unknown) => toast({ title, description: apiErrorMessage(err), variant: 'destructive' })
+}
+
+/** Fiscal year + optional period picker shared by the tabs. */
+function PeriodPicker({
+  fiscalYearId,
+  periodId,
+  onChange,
+  requirePeriod = false,
 }: {
-  report: { id: string | number; name: string } | null
-  onClose: () => void
+  fiscalYearId: number | null
+  periodId: number | null
+  onChange: (fy: number | null, period: number | null) => void
+  requirePeriod?: boolean
 }) {
-  const [selectedFYId, setSelectedFYId] = useState<string>('')
-  const [format, setFormat] = useState<'pdf' | 'xlsx'>('pdf')
   const { data: fiscalYears } = useFiscalYears()
+  const { data: periods } = usePeriods(fiscalYearId)
+  return (
+    <div className="flex flex-wrap gap-3">
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Fiscal year</label>
+        <Select value={fiscalYearId?.toString() ?? ''} onValueChange={(v) => onChange(Number(v), null)}>
+          <SelectTrigger className="w-40">
+            <SelectValue placeholder="Select year" />
+          </SelectTrigger>
+          <SelectContent>
+            {fiscalYears?.map((fy) => (
+              <SelectItem key={fy.id} value={fy.id.toString()}>
+                {fy.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Through period</label>
+        <Select
+          value={periodId?.toString() ?? (requirePeriod ? '' : 'ye')}
+          onValueChange={(v) => onChange(fiscalYearId, v === 'ye' ? null : Number(v))}
+          disabled={!fiscalYearId}
+        >
+          <SelectTrigger className="w-40">
+            <SelectValue placeholder="Select period" />
+          </SelectTrigger>
+          <SelectContent>
+            {!requirePeriod && <SelectItem value="ye">Year end</SelectItem>}
+            {periods?.map((p) => (
+              <SelectItem key={p.id} value={p.id.toString()}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
 
-  if (!report) return null
+// ---------------------------------------------------------------------------
+// Statements & saved reports
+// ---------------------------------------------------------------------------
+
+function ReportCard({ report, onOpen, onEdit }: { report: Report; onOpen: () => void; onEdit: () => void }) {
+  const { hasRole } = useAuthStore()
+  const clone = useCloneReport()
+  const remove = useDeleteReport()
+  return (
+    <Card className="flex flex-col">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-start justify-between gap-2 text-sm">
+          <span>{report.name}</span>
+          {report.is_protected && <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="Protected template" />}
+        </CardTitle>
+        {report.description && <CardDescription className="text-xs">{report.description}</CardDescription>}
+      </CardHeader>
+      <CardContent className="mt-auto flex flex-wrap gap-2">
+        <Button size="sm" onClick={onOpen}>
+          <Play className="mr-1 h-3 w-3" /> Open
+        </Button>
+        {hasRole(FINANCE) && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={clone.isPending}
+            onClick={() =>
+              clone.mutate(report.id, {
+                onSuccess: (c) => toast({ title: `Created “${c.name}”`, description: 'Edit it under Saved reports.' }),
+                onError: onError('Clone failed'),
+              })
+            }
+          >
+            <Copy className="mr-1 h-3 w-3" /> {report.is_protected ? 'Customize' : 'Duplicate'}
+          </Button>
+        )}
+        {!report.is_protected && hasRole(FINANCE) && (
+          <>
+            <Button size="sm" variant="outline" onClick={onEdit}>
+              Edit
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label="Delete report"
+              onClick={() => {
+                if (window.confirm(`Delete “${report.name}”?`)) remove.mutate(report.id, { onError: onError('Delete failed') })
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ReportRunner({ report, onBack }: { report: Report; onBack: () => void }) {
+  const [fy, setFy] = useState<number | null>(null)
+  const [period, setPeriod] = useState<number | null>(null)
+  const generate = useGenerateReport()
+  const body = { fiscal_year_id: fy ?? 0, period_id: period ?? undefined }
+
+  const exportAs = (fmt: 'pdf' | 'excel') =>
+    downloadFile(`/v1/reports/${report.id}/export/${fmt}`, `${report.name}.${fmt === 'pdf' ? 'pdf' : 'xlsx'}`, {
+      method: 'post',
+      data: body,
+    }).catch(onError('Export failed'))
 
   return (
-    <Dialog open={!!report} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Generate: {report.name}</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4 py-2">
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Fiscal Year</label>
-            <Select value={selectedFYId} onValueChange={setSelectedFYId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select fiscal year" />
-              </SelectTrigger>
-              <SelectContent>
-                {fiscalYears?.map((fy) => (
-                  <SelectItem key={fy.id} value={fy.id.toString()}>{fy.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Export Format</label>
-            <Select value={format} onValueChange={(v) => setFormat(v as 'pdf' | 'xlsx')}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="pdf">PDF</SelectItem>
-                <SelectItem value="xlsx">Excel (.xlsx)</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          ← All reports
+        </Button>
+        <PeriodPicker fiscalYearId={fy} periodId={period} onChange={(f, p) => { setFy(f); setPeriod(p) }} />
+        <Button
+          size="sm"
+          disabled={!fy || generate.isPending}
+          onClick={() => generate.mutate({ id: report.id, ...body }, { onError: onError('Could not generate report') })}
+        >
+          <Play className="mr-2 h-4 w-4" /> Generate
+        </Button>
+        <Button size="sm" variant="outline" disabled={!fy} onClick={() => void exportAs('pdf')}>
+          <Download className="mr-2 h-4 w-4" /> PDF
+        </Button>
+        <Button size="sm" variant="outline" disabled={!fy} onClick={() => void exportAs('excel')}>
+          <Download className="mr-2 h-4 w-4" /> Excel
+        </Button>
+      </div>
+      <h2 className="text-lg font-semibold">{report.name}</h2>
+      {generate.isPending ? <LoadingSpinner fullPage /> : generate.data && <ReportView report={generate.data} />}
+    </div>
+  )
+}
+
+function ReportEditor({ report, onBack }: { report: Report | null; onBack: () => void }) {
+  const [name, setName] = useState(report?.name ?? 'New report')
+  const [text, setText] = useState(JSON.stringify(report?.definition ?? BLANK_DEFINITION, null, 2))
+  const [fy, setFy] = useState<number | null>(null)
+  const [period, setPeriod] = useState<number | null>(null)
+  const [problems, setProblems] = useState<string[]>([])
+  const [preview, setPreview] = useState<ReportOutput | null>(null)
+  const validate = useValidateDefinition()
+  const previewMutation = usePreviewReport()
+  const save = useSaveReport()
+  const revert = useRevertReport()
+
+  const parsed = useMemo(() => {
+    try {
+      return { definition: JSON.parse(text) as Record<string, unknown>, error: null }
+    } catch (e) {
+      return { definition: null, error: (e as Error).message }
+    }
+  }, [text])
+
+  const check = (then?: (definition: Record<string, unknown>) => void) => {
+    if (!parsed.definition) return setProblems([`Invalid JSON: ${parsed.error}`])
+    validate.mutate(parsed.definition, {
+      onSuccess: (r) => {
+        setProblems(r.problems)
+        if (r.valid && then) then(parsed.definition!)
+      },
+    })
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          ← All reports
+        </Button>
+        <div className="space-y-1">
+          <Label>Name</Label>
+          <Input className="w-80" value={name} onChange={(e) => setName(e.target.value)} />
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button disabled={!selectedFYId}>
-            <Download className="mr-2 h-4 w-4" />
-            Generate &amp; Download
+        <Button
+          size="sm"
+          disabled={save.isPending}
+          onClick={() =>
+            check((definition) =>
+              save.mutate(
+                {
+                  id: report?.id,
+                  name,
+                  report_type: String(definition.report_type ?? report?.report_type ?? 'custom'),
+                  definition,
+                },
+                { onSuccess: () => toast({ title: 'Report saved' }), onError: onError('Save failed') }
+              )
+            )
+          }
+        >
+          <Save className="mr-2 h-4 w-4" /> Save
+        </Button>
+        {!!report?.definition?.source_template_key && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              window.confirm('Replace this report with the current standard layout?') &&
+              revert.mutate(report.id, {
+                onSuccess: (r) => {
+                  setText(JSON.stringify(r.definition, null, 2))
+                  toast({ title: 'Reverted to the standard layout' })
+                },
+                onError: onError('Revert failed'),
+              })
+            }
+          >
+            <RotateCcw className="mr-2 h-4 w-4" /> Revert to standard
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        )}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label>Definition (JSON)</Label>
+            <Button size="sm" variant="ghost" onClick={() => check()}>
+              Validate
+            </Button>
+          </div>
+          <Textarea
+            className="h-[60vh] font-mono text-xs"
+            spellCheck={false}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          {problems.length > 0 ? (
+            <ul className="list-disc space-y-1 pl-5 text-xs text-destructive">
+              {problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          ) : (
+            validate.data?.valid && <p className="text-xs text-green-700">Definition is valid.</p>
+          )}
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer">Row and column reference</summary>
+            <div className="mt-2 space-y-1">
+              <p><b>section / group</b>: label, children, total_label. <b>accounts</b>: classifications (e.g. "revenue.taxation", "liabilities*"), accounts (code globs like "6-1*"), sign (-1 for credit lines), measure (closing | opening | movement), show_detail.</p>
+              <p><b>formula</b>: formula over row ids ("fa - li"; functions abs, min, max, round, pct). <b>manual</b>: values per column. <b>text</b>: label with tokens {'{fiscal_year}'}, {'{period_end}'}, {'{organization}'}, {'{row:ID:COL}'}.</p>
+              <p><b>columns</b>: source actual (year_offset), budget (budget_version original | amended) or formula ("cy - bud").</p>
+            </div>
+          </details>
+        </div>
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-end gap-3">
+            <PeriodPicker fiscalYearId={fy} periodId={period} onChange={(f, p) => { setFy(f); setPeriod(p) }} />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!fy || previewMutation.isPending}
+              onClick={() =>
+                check((definition) =>
+                  previewMutation.mutate(
+                    { definition, fiscal_year_id: fy!, period_id: period ?? undefined },
+                    { onSuccess: setPreview, onError: onError('Preview failed') }
+                  )
+                )
+              }
+            >
+              <Play className="mr-2 h-4 w-4" /> Preview
+            </Button>
+          </div>
+          {preview ? (
+            <ReportView report={preview} />
+          ) : (
+            <div className="rounded-md border p-12 text-center text-sm text-muted-foreground">
+              Choose a fiscal year and preview to see the report.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StatementsTab() {
+  const { hasRole } = useAuthStore()
+  const { data: reports, isLoading } = useReports()
+  const [running, setRunning] = useState<Report | null>(null)
+  const [editing, setEditing] = useState<Report | 'new' | null>(null)
+
+  if (running) return <ReportRunner report={running} onBack={() => setRunning(null)} />
+  if (editing) return <ReportEditor report={editing === 'new' ? null : editing} onBack={() => setEditing(null)} />
+  if (isLoading) return <LoadingSpinner fullPage />
+
+  // conventional statement order, then anything else alphabetically
+  const ORDER = ['sfp', 'so', 'scnfa', 'scf', 'notes']
+  const rank = (r: Report) => {
+    const i = ORDER.indexOf(r.report_type.split('_').slice(1).join('_'))
+    return i === -1 ? ORDER.length : i
+  }
+  const sorted = [...(reports ?? [])].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+  const groups: { title: string; items: Report[] }[] = [
+    { title: 'PSAB financial statements', items: sorted.filter((r) => r.is_template && r.report_type.startsWith('psab')) },
+    { title: 'LGDE / SOFI statements', items: sorted.filter((r) => r.is_template && r.report_type.startsWith('lgde')) },
+    { title: 'Saved reports', items: sorted.filter((r) => !r.is_template) },
+  ]
+
+  return (
+    <div className="space-y-6">
+      {hasRole(FINANCE) && (
+        <div className="flex justify-end">
+          <Button size="sm" onClick={() => setEditing('new')}>
+            <Plus className="mr-2 h-4 w-4" /> New report
+          </Button>
+        </div>
+      )}
+      {groups.map((g) => (
+        <section key={g.title} className="space-y-2">
+          <h3 className="text-sm font-semibold">
+            {g.title} <Badge variant="secondary">{g.items.length}</Badge>
+          </h3>
+          {g.items.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {g.title === 'Saved reports'
+                ? 'Customize a built-in statement or create a new report to see it here.'
+                : 'No templates installed.'}
+            </p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {g.items.map((r) => (
+                <ReportCard key={r.id} report={r} onOpen={() => setRunning(r)} onEdit={() => setEditing(r)} />
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Working papers
+// ---------------------------------------------------------------------------
+
+const WORKING_PAPERS = [
+  { key: 'trial-balance', name: 'Working trial balance', description: 'Opening → unadjusted → AJEs → RJEs → final, per account.' },
+  { key: 'leadsheets', name: 'Leadsheets', description: 'Working trial balance grouped by PSAB classification, with prior year.' },
+  { key: 'aje', name: 'Adjusting entries schedule', description: 'All posted adjusting journal entries for the year.' },
+  { key: 'rje', name: 'Reclassification schedule', description: 'All posted reclassifying entries for the year.' },
+] as const
+
+function WorkingPapersTab() {
+  const [fy, setFy] = useState<number | null>(null)
+  const [period, setPeriod] = useState<number | null>(null)
+
+  const download = (key: (typeof WORKING_PAPERS)[number]['key'], format: 'xlsx' | 'pdf') => {
+    const isSchedule = key === 'aje' || key === 'rje'
+    const url = `/v1/working-papers/${isSchedule ? 'je-schedule' : key}`
+    const params = isSchedule
+      ? { fiscal_year_id: fy, entry_type: key === 'aje' ? 'adjusting' : 'reclassifying', format }
+      : { period_id: period, format }
+    void downloadFile(url, `${key}.${format}`, { params }).catch(onError('Export failed'))
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <PeriodPicker fiscalYearId={fy} periodId={period} onChange={(f, p) => { setFy(f); setPeriod(p) }} requirePeriod />
+        <Button
+          size="sm"
+          disabled={!period}
+          onClick={() =>
+            void downloadFile('/v1/working-papers/package', 'working_papers.zip', { params: { period_id: period } }).catch(
+              onError('Package failed')
+            )
+          }
+        >
+          <FileArchive className="mr-2 h-4 w-4" /> Download package (ZIP)
+        </Button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {WORKING_PAPERS.map((wp) => {
+          const ready = wp.key === 'aje' || wp.key === 'rje' ? !!fy : !!period
+          return (
+            <Card key={wp.key}>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <FileText className="h-4 w-4" /> {wp.name}
+                </CardTitle>
+                <CardDescription className="text-xs">{wp.description}</CardDescription>
+              </CardHeader>
+              <CardContent className="flex gap-2">
+                <Button size="sm" variant="outline" disabled={!ready} onClick={() => download(wp.key, 'xlsx')}>
+                  <Download className="mr-1 h-3 w-3" /> Excel
+                </Button>
+                <Button size="sm" variant="outline" disabled={!ready} onClick={() => download(wp.key, 'pdf')}>
+                  <Download className="mr-1 h-3 w-3" /> PDF
+                </Button>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// SOFI schedules
+// ---------------------------------------------------------------------------
+
+const SOFI: { type: SofiScheduleType; name: string; hint: string }[] = [
+  { type: 'supplier_payment', name: 'Supplier payments', hint: 'CSV columns: Supplier (or Vendor Name), Amount' },
+  { type: 'employee_remuneration', name: 'Employee remuneration & expenses', hint: 'CSV columns: Employee, Position, Remuneration, Expenses, Elected (Y/N)' },
+  { type: 'guarantee_indemnity', name: 'Guarantees & indemnities', hint: 'CSV columns: Agreement, Amount, Description' },
+]
+
+function SofiSchedule({ type, hint, fiscalYearId }: { type: SofiScheduleType; hint: string; fiscalYearId: number }) {
+  const { hasRole } = useAuthStore()
+  const { data, isLoading } = useSofiSchedule(type, fiscalYearId)
+  const importMutation = useImportSofi()
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {hasRole(FINANCE) && (
+          <label className="inline-flex cursor-pointer items-center rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+            <Upload className="mr-2 h-4 w-4" /> Import CSV (replaces year)
+            <input
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                e.target.value = ''
+                if (!file) return
+                importMutation.mutate(
+                  { type, fiscalYearId, file },
+                  {
+                    onSuccess: (r) =>
+                      toast({
+                        title: `Imported ${r.records_imported} rows`,
+                        description: r.errors.length ? r.errors.slice(0, 3).join('; ') : undefined,
+                        variant: r.errors.length ? 'destructive' : undefined,
+                      }),
+                    onError: onError('Import failed'),
+                  }
+                )
+              }}
+            />
+          </label>
+        )}
+        <span className="text-xs text-muted-foreground">{hint}</span>
+        <div className="flex-1" />
+        {(['xlsx', 'pdf'] as const).map((format) => (
+          <Button
+            key={format}
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void downloadFile(`/v1/sofi/schedules/${type}`, `${type}.${format}`, {
+                params: { fiscal_year_id: fiscalYearId, format },
+              }).catch(onError('Export failed'))
+            }
+          >
+            <Download className="mr-1 h-3 w-3" /> {format === 'xlsx' ? 'Excel' : 'PDF'}
+          </Button>
+        ))}
+      </div>
+      {isLoading ? <LoadingSpinner fullPage /> : data && <ReportView report={data} />}
+    </div>
+  )
+}
+
+function SofiTab() {
+  const { data: fiscalYears } = useFiscalYears()
+  const [fy, setFy] = useState<number | null>(null)
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Fiscal year</label>
+        <Select value={fy?.toString() ?? ''} onValueChange={(v) => setFy(Number(v))}>
+          <SelectTrigger className="w-40">
+            <SelectValue placeholder="Select year" />
+          </SelectTrigger>
+          <SelectContent>
+            {fiscalYears?.map((y) => (
+              <SelectItem key={y.id} value={y.id.toString()}>
+                {y.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {fy && (
+        <Tabs defaultValue="supplier_payment">
+          <TabsList>
+            {SOFI.map((s) => (
+              <TabsTrigger key={s.type} value={s.type}>
+                {s.name}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {SOFI.map((s) => (
+            <TabsContent key={s.type} value={s.type} className="mt-4">
+              <SofiSchedule type={s.type} hint={s.hint} fiscalYearId={fy} />
+            </TabsContent>
+          ))}
+        </Tabs>
+      )}
+    </div>
   )
 }
 
 export function ReportsPage() {
-  const [generateTarget, setGenerateTarget] = useState<{ id: string | number; name: string } | null>(null)
-
-  const { data: savedReports, isLoading } = useQuery({
-    queryKey: ['reports'],
-    queryFn: () => api.get<Report[]>('/v1/reports').then((r) => r.data),
-  })
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <PageHeader
         title="Reports"
-        description="Generate financial statements, LGDE schedules, and working paper reports"
-        actions={
-          <Button size="sm">
-            <Plus className="mr-2 h-4 w-4" />
-            New Report
-          </Button>
-        }
+        description="PSAB and LGDE financial statements, custom reports, working papers and SOFI schedules"
       />
-
-      <Tabs defaultValue="templates">
+      <Tabs defaultValue="statements">
         <TabsList>
-          <TabsTrigger value="templates">
-            <LayoutTemplate className="mr-2 h-4 w-4" />
-            Templates
-          </TabsTrigger>
-          <TabsTrigger value="saved">
-            <FileText className="mr-2 h-4 w-4" />
-            Saved Reports
-          </TabsTrigger>
+          <TabsTrigger value="statements">Statements &amp; reports</TabsTrigger>
+          <TabsTrigger value="working-papers">Working papers</TabsTrigger>
+          <TabsTrigger value="sofi">SOFI schedules</TabsTrigger>
         </TabsList>
-
-        {/* Built-in Templates */}
-        <TabsContent value="templates" className="mt-4">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {builtInTemplates.map((tpl) => (
-              <Card key={tpl.id} className="flex flex-col">
-                <CardHeader className="pb-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="text-sm leading-snug">{tpl.name}</CardTitle>
-                    <Badge variant="outline" className="shrink-0 text-xs">{tpl.category}</Badge>
-                  </div>
-                  <CardDescription className="text-xs">{tpl.description}</CardDescription>
-                </CardHeader>
-                <CardContent className="mt-auto pt-2 flex gap-2">
-                  <Button
-                    size="sm"
-                    className="flex-1"
-                    onClick={() => setGenerateTarget({ id: tpl.id, name: tpl.name })}
-                  >
-                    <Play className="mr-2 h-3 w-3" />
-                    Generate
-                  </Button>
-                  <Button size="sm" variant="outline">
-                    <Download className="h-4 w-4" />
-                  </Button>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+        <TabsContent value="statements" className="mt-4">
+          <StatementsTab />
         </TabsContent>
-
-        {/* Saved Reports */}
-        <TabsContent value="saved" className="mt-4">
-          {isLoading ? (
-            <LoadingSpinner fullPage />
-          ) : !savedReports?.length ? (
-            <div className="rounded-lg border bg-card p-12 text-center">
-              <FileText className="mx-auto h-8 w-8 text-muted-foreground mb-3" />
-              <p className="text-sm text-muted-foreground">No saved reports yet.</p>
-            </div>
-          ) : (
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Fiscal Year</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {savedReports.map((report) => (
-                    <TableRow key={report.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          {report.is_protected && <Lock className="h-3 w-3 text-muted-foreground" />}
-                          <span className="font-medium text-sm">{report.name}</span>
-                        </div>
-                        {report.description && (
-                          <p className="text-xs text-muted-foreground mt-0.5">{report.description}</p>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{report.report_type}</Badge>
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {report.fiscal_year_id ?? '—'}
-                      </TableCell>
-                      <TableCell className="text-sm">{formatDate(report.created_at)}</TableCell>
-                      <TableCell>
-                        <div className="flex gap-1">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setGenerateTarget({ id: report.id, name: report.name })}
-                          >
-                            <Play className="mr-1 h-3 w-3" />
-                            Run
-                          </Button>
-                          <Button size="sm" variant="ghost">
-                            <Download className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+        <TabsContent value="working-papers" className="mt-4">
+          <WorkingPapersTab />
+        </TabsContent>
+        <TabsContent value="sofi" className="mt-4">
+          <SofiTab />
         </TabsContent>
       </Tabs>
-
-      <GenerateDialog report={generateTarget} onClose={() => setGenerateTarget(null)} />
     </div>
   )
 }

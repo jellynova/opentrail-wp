@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import io
+import re
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -199,7 +200,7 @@ def export_to_pdf(report: Dict[str, Any]) -> bytes:
 
 def safe_filename(name: str) -> str:
     keep = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in name).strip()
-    return (keep.replace(" ", "_") or "report")[:80]
+    return (re.sub(r"_+", "_", keep.replace(" ", "_")).strip("_") or "report")[:80]
 
 
 def table_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
