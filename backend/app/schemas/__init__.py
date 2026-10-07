@@ -53,7 +53,9 @@ from app.schemas.budget import (  # noqa: F401
     BudgetRequestUpdate,
     BudgetApprovalRequest,
     BudgetRequestResponse,
-    VarianceReport,
+    BudgetAmendmentCreate,
+    BudgetAmendmentResponse,
+    BudgetLineResponse,
 )
 from app.schemas.document import (  # noqa: F401
     WorkingPaperResponse,

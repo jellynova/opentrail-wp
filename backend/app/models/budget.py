@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from typing import Optional
 from sqlalchemy import String, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 
@@ -49,3 +49,43 @@ class BudgetLine(Base):
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), nullable=False)
     approved_amount: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False)
     budget_type: Mapped[str] = mapped_column(String(20), nullable=False)  # operating / capital
+
+
+class BudgetAmendment(Base):
+    """
+    A mid-year budget amendment (PLAN §6.4), e.g. an amending financial plan bylaw.
+    Amended budget = original budget lines + approved amendment lines.
+    """
+
+    __tablename__ = "budget_amendments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    budget_year_id: Mapped[int] = mapped_column(Integer, ForeignKey("budget_years.id"), nullable=False, index=True)
+    amendment_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    approval_reference: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)  # bylaw / resolution no.
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")  # draft / approved
+    approved_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    created_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    approved_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    lines: Mapped[list["BudgetAmendmentLine"]] = relationship(
+        "BudgetAmendmentLine", back_populates="amendment", cascade="all, delete-orphan"
+    )
+
+
+class BudgetAmendmentLine(Base):
+    __tablename__ = "budget_amendment_lines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    amendment_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("budget_amendments.id"), nullable=False, index=True
+    )
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), nullable=False)
+    amount: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False)  # change: + increases the budget
+    description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    amendment: Mapped["BudgetAmendment"] = relationship("BudgetAmendment", back_populates="lines")
