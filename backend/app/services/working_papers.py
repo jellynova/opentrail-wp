@@ -8,6 +8,7 @@ Auto-generated working papers (PLAN §4.3 / §5.3):
 """
 from __future__ import annotations
 
+import io
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -208,3 +209,162 @@ def journal_entry_schedule(
         "total_debit": total_debit,
         "total_credit": total_credit,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tabular conversions for Excel/PDF export
+# ---------------------------------------------------------------------------
+
+def _org() -> str:
+    from app.core.config import settings
+
+    return settings.ORGANIZATION_NAME
+
+
+def wtb_table(db: Session, period_id: int) -> Dict[str, Any]:
+    period = get_period(db, period_id)
+    fy = db.get(FiscalYear, period.fiscal_year_id)
+    rows = working_trial_balance(db, period_id)
+    keys = ["unadjusted_balance", "aje_net", "adjusted_balance", "rje_net", "final_balance"]
+    out = []
+    totals = {k: ZERO for k in keys}
+    for r in rows:
+        vals = {
+            "unadjusted_balance": r["unadjusted_balance"],
+            "aje_net": r["aje_debit"] - r["aje_credit"],
+            "adjusted_balance": r["adjusted_balance"],
+            "rje_net": r["rje_debit"] - r["rje_credit"],
+            "final_balance": r["final_balance"],
+        }
+        for k in keys:
+            totals[k] += vals[k]
+        out.append({"label": r["description"] or "", "text": {"acct": r["acct_fmtd"]}, "values": vals,
+                    "level": 0, "style": {}})
+    out.append({"label": "Total (debits less credits)", "values": totals, "level": 0,
+                "style": {"bold": True, "underline": "double"}, "text": {}})
+    return {
+        "organization": _org(),
+        "title": "Working Trial Balance",
+        "subtitle": f"{fy.label if fy else ''} — through {period.name} (debits positive, credits negative)",
+        "number_format": {"decimals": 2},
+        "text_columns": [{"key": "acct", "label": "Account", "width": 18}],
+        "columns": [
+            {"key": "unadjusted_balance", "label": "Unadjusted"},
+            {"key": "aje_net", "label": "AJEs"},
+            {"key": "adjusted_balance", "label": "Adjusted"},
+            {"key": "rje_net", "label": "RJEs"},
+            {"key": "final_balance", "label": "Final"},
+        ],
+        "rows": out,
+    }
+
+
+def leadsheets_table(db: Session, period_id: int, scheme: Optional[object] = "PSAB") -> Dict[str, Any]:
+    data = leadsheets(db, period_id, scheme)
+    labels = {}
+    try:
+        from app.services.builtin_templates import PSAB_TAXONOMY
+
+        labels = PSAB_TAXONOMY
+    except ImportError:  # pragma: no cover
+        pass
+    out = []
+    for g in data["leadsheets"]:
+        title = labels.get(g["classification"], g["classification"].replace("_", " ").replace(".", " — ").title())
+        out.append({"label": title, "values": {}, "level": 0, "style": {"bold": True}, "text": {}})
+        for a in g["accounts"]:
+            out.append({"label": a["description"] or "", "text": {"acct": a["acct_fmtd"]}, "level": 1, "style": {},
+                        "values": {k: a[k] for k in ("prior_year", "unadjusted", "aje", "rje", "final", "change")}})
+        out.append({"label": f"Total {title}", "values": dict(g["totals"]), "level": 0, "text": {},
+                    "style": {"bold": True, "underline": "single"}})
+    return {
+        "organization": _org(),
+        "title": "Leadsheets",
+        "subtitle": f"{data['fiscal_year']} — through {data['period_name']} (debits positive, credits negative)",
+        "number_format": {"decimals": 2},
+        "text_columns": [{"key": "acct", "label": "Account", "width": 18}],
+        "columns": [
+            {"key": "prior_year", "label": data["prior_fiscal_year"] or "Prior year"},
+            {"key": "unadjusted", "label": "Unadjusted"},
+            {"key": "aje", "label": "AJEs"},
+            {"key": "rje", "label": "RJEs"},
+            {"key": "final", "label": data["fiscal_year"] or "Final"},
+            {"key": "change", "label": "Change"},
+        ],
+        "rows": out,
+    }
+
+
+def je_schedule_table(db: Session, fiscal_year_id: int, entry_type: str = "adjusting",
+                      include_drafts: bool = False) -> Dict[str, Any]:
+    data = journal_entry_schedule(db, fiscal_year_id, entry_type, include_drafts)
+    titles = {"adjusting": "Adjusting Journal Entries", "reclassifying": "Reclassification Entries",
+              "elimination": "Elimination Entries", "budget_variance": "Budget Adjustment Entries"}
+    out = []
+    for e in data["entries"]:
+        out.append({"label": f"{e['reference'] or ''} — {e['description'] or ''}".strip(" —"),
+                    "text": {"date": str(e["entry_date"]), "acct": ""}, "values": {}, "level": 0,
+                    "style": {"bold": True}})
+        for l in e["lines"]:
+            out.append({"label": l["description"] or l["account_description"] or "", "level": 1, "style": {},
+                        "text": {"date": "", "acct": l["acct_fmtd"]},
+                        "values": {"debit": l["debit"] or None, "credit": l["credit"] or None}})
+        out.append({"label": "", "values": {"debit": e["total_debit"], "credit": e["total_credit"]}, "level": 1,
+                    "style": {"underline": "single"}, "text": {}})
+    out.append({"label": "Total", "values": {"debit": data["total_debit"], "credit": data["total_credit"]},
+                "level": 0, "style": {"bold": True, "underline": "double"}, "text": {}})
+    return {
+        "organization": _org(),
+        "title": titles.get(entry_type, entry_type),
+        "subtitle": f"Fiscal year {data['fiscal_year']}" + (" (including drafts)" if include_drafts else ""),
+        "number_format": {"decimals": 2},
+        "text_columns": [{"key": "date", "label": "Date", "width": 12}, {"key": "acct", "label": "Account", "width": 18}],
+        "columns": [{"key": "debit", "label": "Debit"}, {"key": "credit", "label": "Credit"}],
+        "rows": out,
+    }
+
+
+def working_paper_package(db: Session, period_id: int) -> bytes:
+    """ZIP of the working papers and built-in financial statements for a period (PLAN §5.4)."""
+    import zipfile
+
+    from sqlalchemy import select as _select
+
+    from app.models.report import Report
+    from app.services.report_engine import ReportDefinitionError
+    from app.services.report_generator import export_to_excel, export_to_pdf, generate_report_data, safe_filename
+
+    period = get_period(db, period_id)
+    fy = db.get(FiscalYear, period.fiscal_year_id)
+    docs = [
+        ("01_Working_Trial_Balance", wtb_table(db, period_id)),
+        ("02_Leadsheets", leadsheets_table(db, period_id)),
+        ("03_Adjusting_Entries", je_schedule_table(db, period.fiscal_year_id, "adjusting")),
+        ("04_Reclassification_Entries", je_schedule_table(db, period.fiscal_year_id, "reclassifying")),
+    ]
+    statements = db.scalars(
+        _select(Report).where(Report.is_template.is_(True), Report.report_type.like("psab_%")).order_by(Report.id)
+    ).all()
+    problems: List[str] = []
+    for i, report in enumerate(statements, start=1):
+        try:
+            docs.append((f"Statements/{i:02d}_{safe_filename(report.name)}",
+                         generate_report_data(db, report.definition, period.fiscal_year_id, period_id)))
+        except (ReportDefinitionError, ValueError) as exc:
+            problems.append(f"{report.name}: {exc}")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, table in docs:
+            zf.writestr(f"{name}.xlsx", export_to_excel(table))
+            try:
+                zf.writestr(f"{name}.pdf", export_to_pdf(table))
+            except Exception as exc:  # PDF rendering is best-effort; Excel is always included
+                problems.append(f"{name}.pdf: {exc}")
+            problems.extend(f"{name}: {w}" for w in table.get("warnings", []))
+        index = [f"Working paper package — {_org()}", f"Fiscal year {fy.label if fy else ''}, through {period.name}", ""]
+        index += [name for name, _ in docs]
+        if problems:
+            index += ["", "Warnings:"] + problems
+        zf.writestr("README.txt", "\n".join(index) + "\n")
+    return buf.getvalue()

@@ -12,6 +12,7 @@ from app.models.journal_entry import JournalEntry, JournalLine  # noqa: F401
 from app.models.document import WorkingPaper, WPAnnotation  # noqa: F401
 from app.models.budget import BudgetYear, BudgetRequest, BudgetLine  # noqa: F401
 from app.models.report import Report  # noqa: F401
+from app.models.sofi import SofiEntry  # noqa: F401
 
 __all__ = [
     "Base",
@@ -34,4 +35,5 @@ __all__ = [
     "BudgetRequest",
     "BudgetLine",
     "Report",
+    "SofiEntry",
 ]

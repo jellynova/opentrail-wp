@@ -170,3 +170,37 @@ def test_connector_import_computes_ytd(db, fy2025, monkeypatch):
 
     imported, updated, _ = tb_svc.import_from_connector(db, conn.id, fy2025.id, p2.id, 2025, 2)
     assert (imported, updated) == (0, 1)
+
+
+@pytest.mark.parametrize("path,params", [
+    ("trial-balance", {}), ("leadsheets", {}), ("je-schedule", {"entry_type": "reclassifying"}),
+])
+def test_working_paper_excel_exports(client, auth, data, path, params):
+    p = {"format": "xlsx", **params}
+    p["fiscal_year_id" if path == "je-schedule" else "period_id"] = (
+        data["fy25"].id if path == "je-schedule" else data["p3"].id)
+    r = client.get(f"/api/v1/working-papers/{path}", params=p, headers=auth("viewer"))
+    assert r.status_code == 200, r.text
+    assert r.content[:2] == b"PK"
+
+
+def test_money_is_exact_in_json(client, auth, data):
+    rows = client.get("/api/v1/working-papers/trial-balance", params={"period_id": data["p3"].id},
+                      headers=auth("viewer")).json()
+    assert isinstance(rows[0]["final_balance"], str)
+
+
+def test_working_paper_package(client, auth, db, users, data):
+    import io
+    import zipfile
+
+    from app.services.builtin_templates import seed_templates
+
+    seed_templates(db, users["admin"].id)
+    r = client.get("/api/v1/working-papers/package", params={"period_id": data["p3"].id}, headers=auth("viewer"))
+    assert r.status_code == 200
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert "01_Working_Trial_Balance.xlsx" in names and "README.txt" in names
+    assert any(n.startswith("Statements/") and "Financial_Position" in n for n in names)
+    assert client.get("/api/v1/working-papers/package", params={"period_id": 999},
+                      headers=auth("viewer")).status_code == 404

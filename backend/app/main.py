@@ -19,6 +19,7 @@ from app.api.v1 import (
     budget,
     connectors,
     working_papers,
+    sofi,
 )
 
 
@@ -101,6 +102,9 @@ app.include_router(budget.router, prefix="/api/v1", tags=["budget"])
 
 # Reports
 app.include_router(reports.router, prefix="/api/v1", tags=["reports"])
+
+# Statement of Financial Information schedules
+app.include_router(sofi.router, prefix="/api/v1", tags=["sofi"])
 
 # Documents / Working Papers
 app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
