@@ -23,7 +23,7 @@ from app.api.v1 import (
 
 
 def _init_db() -> None:
-    """Create all tables and seed a default admin user if the users table is empty."""
+    """Create all tables, seed a default admin user if none exist, and seed built-in report templates."""
     import app.models  # noqa: F401 — ensures all models are registered with Base.metadata
     Base.metadata.create_all(bind=engine)
 
@@ -41,6 +41,10 @@ def _init_db() -> None:
                 created_at=datetime.now(timezone.utc),
             ))
             db.commit()
+
+        from app.services.builtin_templates import seed_templates
+        admin = db.scalars(select(User).where(User.role == "finance_admin").order_by(User.id)).first()
+        seed_templates(db, admin.id if admin else db.scalars(select(User)).first().id)
     finally:
         db.close()
 

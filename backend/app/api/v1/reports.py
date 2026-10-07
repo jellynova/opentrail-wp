@@ -128,6 +128,14 @@ def preview_report(
     return _render(db, data.definition, data)
 
 
+@router.get("/reports/psab-taxonomy")
+def psab_taxonomy(current_user: User = Depends(get_current_active_user)):
+    """Classification values used by the built-in templates (for the PSAB mapping UI)."""
+    from app.services.builtin_templates import PSAB_TAXONOMY
+
+    return [{"value": v, "label": l, "group": v.split(".")[0]} for v, l in PSAB_TAXONOMY.items()]
+
+
 @router.get("/reports/{report_id}", response_model=ReportResponse)
 def get_report(
     report_id: int,
@@ -204,6 +212,29 @@ def clone_report(
     db.commit()
     db.refresh(copy)
     return copy
+
+
+@router.post("/reports/{report_id}/revert", response_model=ReportResponse)
+def revert_report(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("finance_admin", "finance_officer")),
+):
+    """Reset a cloned template back to the current standard layout."""
+    from app.services.builtin_templates import TEMPLATES
+
+    report = _get_report_or_404(db, report_id)
+    key = (report.definition or {}).get("source_template_key")
+    if report.is_protected or key not in TEMPLATES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Report was not cloned from a built-in template")
+    definition = dict(TEMPLATES[key]["definition"])
+    definition["source_template_key"] = definition.pop("template_key")
+    report.definition = definition
+    report.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(report)
+    return report
 
 
 @router.post("/reports/{report_id}/generate", response_model=ReportGenerateResponse)

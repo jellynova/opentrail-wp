@@ -24,8 +24,9 @@ Definition (version 2)
 Row types
 ---------
 section / group  {label, children: [...], total_label?, hide_header?}
-                 value = sum of children (account, group and manual rows; formula rows only
-                 when "include_in_total": true). A total row is emitted when total_label is set.
+                 value = sum of children (account, group and manual rows by default; any row
+                 can override with "include_in_total": true/false). A total row is emitted when
+                 total_label is set.
 accounts         {label, classifications: ["revenue.taxation", "liabilities*"],
                   accounts: ["4-1*"], sign: 1|-1, measure: closing|opening|movement,
                   show_detail: bool, scheme?: override}
@@ -36,7 +37,11 @@ manual           {values: {"cy": 1234.56}} — keyed amounts typed in by the use
 text             {label} — static text. Labels anywhere may use tokens: {fiscal_year},
                  {prior_fiscal_year}, {period_end}, {period_name}, {organization},
                  {row:ROW_ID} / {row:ROW_ID:COLUMN} (formatted amount of another row).
-Common row keys: id, style {bold, italic, underline: single|double, indent}, hidden.
+Common row keys: id, style {bold, italic, underline: single|double, indent}, hidden,
+copy_columns {"bud": "cy"} (show another column's value for this row).
+
+"checks": [{"label": ..., "formula": "cash_end - cash_sfp"}] — integrity checks; a non-zero
+result in any actual column adds a warning to the output.
 
 Column sources: actual (year_offset, entry_types), budget (budget_version original|amended),
 formula (over other column keys of the same row).
@@ -274,6 +279,13 @@ def validate_definition(definition: Dict[str, Any]) -> List[str]:
             walk_formulas(r.get("children", []))
 
     walk_formulas(d["rows"])
+    for check in d.get("checks") or []:
+        try:
+            unknown = formula_names(check.get("formula", "")) - set(ids)
+            if unknown:
+                problems.append(f"check '{check.get('label')}': unknown row(s) {sorted(unknown)}")
+        except ReportDefinitionError as exc:
+            problems.append(str(exc))
     return problems
 
 
@@ -433,7 +445,7 @@ class ReportEngine:
                     result[c["key"]] = ZERO
                 for child in row.get("children", []):
                     ct = child.get("type")
-                    if ct in SUMMABLE_TYPES or (ct == "formula" and child.get("include_in_total")):
+                    if child.get("include_in_total", ct in SUMMABLE_TYPES):
                         cv = compute(child["id"])
                         for c in self.source_cols:
                             result[c["key"]] += cv.get(c["key"]) or ZERO
@@ -453,6 +465,10 @@ class ReportEngine:
                         result[c["key"]] = None
             else:  # text
                 result = {c["key"]: None for c in self.source_cols}
+            # e.g. {"bud": "cy"}: show the actual opening surplus in the budget column too
+            for target, source in (row.get("copy_columns") or {}).items():
+                if target in result and source in result:
+                    result[target] = result[source]
             in_progress.discard(row_id)
             values[row_id] = result
             return result
@@ -473,6 +489,17 @@ class ReportEngine:
         for lines in detail.values():
             for line in lines:
                 apply_column_formulas(line["values"], True)
+
+        for check in self.d.get("checks") or []:
+            for c in self.source_cols:
+                if c.get("source", "actual") != "actual":
+                    continue  # checks reconcile actuals; budget columns have no balance sheet
+                diff = evaluate_formula(check["formula"], lambda name, k=c["key"]: compute(name).get(k))
+                if diff is not None and abs(diff) >= Decimal("0.005"):
+                    self.warnings.append(
+                        f"Check failed — {check.get('label', check['formula'])} "
+                        f"({self._tokens(c.get('label', c['key']))}): difference {diff:,.2f}"
+                    )
 
         self._values = values
         out_rows: List[Dict[str, Any]] = []
