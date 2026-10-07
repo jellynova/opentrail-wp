@@ -146,3 +146,66 @@ def period_of(fy: FiscalYear, n: int) -> Period:
 @pytest.fixture()
 def fy2025(db) -> FiscalYear:
     return make_fiscal_year(db, 2025)
+
+
+def add_tb(db: Session, period: Period, account: Account, ytd=0, opening=0, period_amt=None) -> None:
+    """Add a TB entry from signed debit-positive amounts."""
+    from decimal import Decimal
+
+    from app.models.trial_balance import TrialBalanceEntry
+
+    def sides(v):
+        v = Decimal(str(v))
+        return (v, Decimal("0")) if v >= 0 else (Decimal("0"), -v)
+
+    od, oc = sides(opening)
+    yd, yc = sides(ytd)
+    pd, pc = sides(ytd if period_amt is None else period_amt)
+    db.add(
+        TrialBalanceEntry(
+            period_id=period.id, account_id=account.id,
+            opening_debit=od, opening_credit=oc, period_debit=pd, period_credit=pc,
+            ytd_debit=yd, ytd_credit=yc, source="manual",
+        )
+    )
+    db.commit()
+
+
+def make_scheme(db: Session, name: str = "PSAB"):
+    from app.models.mapping import MappingScheme
+
+    s = MappingScheme(name=name, is_active=True)
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return s
+
+
+def classify(db: Session, scheme, account: Account, value: str) -> None:
+    from app.models.mapping import AccountClassification
+
+    db.add(AccountClassification(account_id=account.id, scheme_id=scheme.id, classification_value=value))
+    db.commit()
+
+
+def add_je(db: Session, period: Period, user: User, entry_type: str, lines, status="posted", reference=None):
+    """lines: [(account, signed debit-positive amount), ...]"""
+    from decimal import Decimal
+
+    from app.models.journal_entry import JournalEntry, JournalLine
+
+    je = JournalEntry(
+        period_id=period.id, entry_date=period.end_date, entry_type=entry_type,
+        prepared_by_user_id=user.id, status=status, reference=reference,
+    )
+    db.add(je)
+    db.flush()
+    for account, amt in lines:
+        amt = Decimal(str(amt))
+        db.add(JournalLine(
+            journal_entry_id=je.id, account_id=account.id,
+            debit=amt if amt > 0 else 0, credit=-amt if amt < 0 else 0,
+        ))
+    db.commit()
+    db.refresh(je)
+    return je

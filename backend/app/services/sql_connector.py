@@ -301,11 +301,11 @@ def pull_coa(connector: ExternalConnector, fiscal_year: int) -> List[Dict[str, A
 
 
 def pull_trial_balance(
-    connector: ExternalConnector, fiscal_year: int, period: int
+    connector: ExternalConnector, fiscal_year: int, period: Optional[int]
 ) -> List[Dict[str, Any]]:
     """
-    Pull all posted trial balance rows from AMAIS for the given fiscal year.
-    The caller filters by period using the fisc_prd field.
+    Pull posted trial balance rows from AMAIS for the given fiscal year, filtered to
+    one period (fisc_prd), or every period when `period` is None.
     Returns raw rows — the service layer aggregates into TB entries.
     """
     if connector.system_type != "amais":
@@ -318,7 +318,8 @@ def pull_trial_balance(
         cursor = conn.cursor()
         cursor.execute(AMAIS_TRIAL_BALANCE_QUERY, (fiscal_year,))
         all_rows = _rows_to_dicts(cursor)
-        # Filter to the specific period
+        if period is None:
+            return all_rows
         return [r for r in all_rows if r.get("fisc_prd") == period]
     finally:
         conn.close()

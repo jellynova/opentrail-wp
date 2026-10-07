@@ -31,19 +31,33 @@ class TrialBalanceEntryUpdate(BaseModel):
 
 
 class WorkingTrialBalanceRow(BaseModel):
+    """
+    One account in the working trial balance. Balances are signed debit-positive.
+    unadjusted = opening + YTD movement; adjusted = unadjusted + AJEs; final = adjusted + RJEs.
+    Journal adjustments are cumulative from period 1 through the selected period.
+    """
+
     account_id: int
     acct_fmtd: str
     description: Optional[str]
+    classification: Optional[str] = None
     opening_debit: Decimal
     opening_credit: Decimal
     period_debit: Decimal
     period_credit: Decimal
     ytd_debit: Decimal
     ytd_credit: Decimal
-    adj_debit: Decimal  # sum of journal entry debits
-    adj_credit: Decimal  # sum of journal entry credits
-    closing_debit: Decimal  # ytd_debit + adj_debit - adj_credit (when normal_balance=debit)
-    closing_credit: Decimal
+    unadjusted_balance: Decimal
+    aje_debit: Decimal
+    aje_credit: Decimal
+    adjusted_balance: Decimal
+    rje_debit: Decimal
+    rje_credit: Decimal
+    adj_debit: Decimal  # AJE + RJE debits
+    adj_credit: Decimal  # AJE + RJE credits
+    final_balance: Decimal
+    closing_debit: Decimal  # final balance when it is a debit, else 0
+    closing_credit: Decimal  # final balance when it is a credit, else 0
 
 
 class CSVImportRequest(BaseModel):

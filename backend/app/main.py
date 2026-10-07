@@ -18,6 +18,7 @@ from app.api.v1 import (
     documents,
     budget,
     connectors,
+    working_papers,
 )
 
 
@@ -84,6 +85,9 @@ app.include_router(trial_balance.router, prefix="/api/v1", tags=["trial-balance"
 
 # Journal Entries
 app.include_router(journal_entries.router, prefix="/api/v1", tags=["journal-entries"])
+
+# Working papers (working TB, leadsheets, AJE/RJE schedules)
+app.include_router(working_papers.router, prefix="/api/v1", tags=["working-papers"])
 
 # Connectors
 app.include_router(connectors.router, prefix="/api/v1", tags=["connectors"])
