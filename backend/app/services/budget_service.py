@@ -117,3 +117,25 @@ def get_variance_report(db: Session, budget_year_id: int) -> Dict[str, Any]:
         "total_actual": total_actual,
         "total_variance": total_budget - total_actual,
     }
+
+
+def budget_year_for_fiscal_year(db: Session, fiscal_year_id: int) -> Optional[BudgetYear]:
+    """The budget year for a fiscal year (the most recently created, if several)."""
+    return db.scalars(
+        select(BudgetYear).where(BudgetYear.fiscal_year_id == fiscal_year_id).order_by(BudgetYear.id.desc())
+    ).first()
+
+
+def budget_amounts_by_account(db: Session, fiscal_year_id: int, version: str = "original") -> Dict[int, Decimal]:
+    """
+    Budget amount per account for a fiscal year, as entered (positive for both revenue and
+    expense). version: "original" (adopted budget lines) or "amended" (original plus
+    approved amendments).
+    """
+    by = budget_year_for_fiscal_year(db, fiscal_year_id)
+    if by is None:
+        return {}
+    amounts: Dict[int, Decimal] = {}
+    for bl in db.scalars(select(BudgetLine).where(BudgetLine.budget_year_id == by.id)).all():
+        amounts[bl.account_id] = amounts.get(bl.account_id, Decimal("0")) + Decimal(str(bl.approved_amount))
+    return amounts
