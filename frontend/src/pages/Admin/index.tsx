@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import api from '@/lib/api'
-import { formatDate, formatDateTime } from '@/lib/utils'
+import { apiErrorMessage, formatDate, formatDateTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
 import { useFiscalYears, useCreateFiscalYear, usePeriods, useCreatePeriod } from '@/hooks/useFiscalYears'
 import type { User, ExternalConnector, MappingScheme } from '@/types'
@@ -42,12 +42,12 @@ function UsersTab() {
 
   const { data: users, isLoading } = useQuery({
     queryKey: ['admin-users'],
-    queryFn: () => api.get<User[]>('/v1/admin/users').then((r) => r.data),
+    queryFn: () => api.get<User[]>('/v1/users').then((r) => r.data),
   })
 
   const createUser = useMutation({
     mutationFn: (payload: object) =>
-      api.post<User>('/v1/admin/users', payload).then((r) => r.data),
+      api.post<User>('/v1/users', payload).then((r) => r.data),
     onSuccess: () => {
       toast({ title: 'User created' })
       void queryClient.invalidateQueries({ queryKey: ['admin-users'] })
@@ -59,7 +59,7 @@ function UsersTab() {
 
   const deactivateUser = useMutation({
     mutationFn: (id: number) =>
-      api.patch(`/v1/admin/users/${id}`, { is_active: false }).then((r) => r.data),
+      api.put(`/v1/users/${id}`, { is_active: false }).then((r) => r.data),
     onSuccess: () => {
       toast({ title: 'User deactivated' })
       void queryClient.invalidateQueries({ queryKey: ['admin-users'] })
@@ -200,12 +200,12 @@ function ConnectorsTab() {
   const { data: connectors, isLoading } = useQuery({
     queryKey: ['connectors'],
     queryFn: () =>
-      api.get<ExternalConnector[]>('/v1/admin/connectors').then((r) => r.data),
+      api.get<ExternalConnector[]>('/v1/connectors').then((r) => r.data),
   })
 
   const createConnector = useMutation({
     mutationFn: (payload: object) =>
-      api.post<ExternalConnector>('/v1/admin/connectors', payload).then((r) => r.data),
+      api.post<ExternalConnector>('/v1/connectors', payload).then((r) => r.data),
     onSuccess: () => {
       toast({ title: 'Connector created' })
       void queryClient.invalidateQueries({ queryKey: ['connectors'] })
@@ -216,16 +216,29 @@ function ConnectorsTab() {
 
   const testConnection = useMutation({
     mutationFn: (id: number) =>
-      api.post(`/v1/admin/connectors/${id}/test`).then((r) => r.data),
+      api.post(`/v1/connectors/${id}/test`).then((r) => r.data),
     onSuccess: () => toast({ title: 'Connection successful' }),
     onError: () => toast({ title: 'Connection failed', variant: 'destructive' }),
   })
 
   const pullCOA = useMutation({
-    mutationFn: (id: number) =>
-      api.post(`/v1/admin/connectors/${id}/pull-coa`).then((r) => r.data),
-    onSuccess: () => toast({ title: 'COA pull started' }),
-    onError: () => toast({ title: 'Pull failed', variant: 'destructive' }),
+    mutationFn: (id: number) => {
+      const year = window.prompt('ERP fiscal year to import (e.g. 2025)', String(new Date().getFullYear()))
+      if (!year) return Promise.resolve(null)
+      return api
+        .post<{ records_created: number; records_updated: number; errors: string[] }>(
+          `/v1/connectors/${id}/pull/coa`,
+          { fiscal_year: Number(year) }
+        )
+        .then((r) => r.data)
+    },
+    onSuccess: (r) =>
+      r &&
+      toast({
+        title: 'Chart of accounts imported',
+        description: `${r.records_created} new, ${r.records_updated} updated${r.errors.length ? `, ${r.errors.length} errors` : ''}`,
+      }),
+    onError: (err) => toast({ title: 'Pull failed', description: apiErrorMessage(err), variant: 'destructive' }),
   })
 
   return (
@@ -572,12 +585,12 @@ function MappingSchemesTab() {
   const { data: schemes, isLoading } = useQuery({
     queryKey: ['mapping-schemes'],
     queryFn: () =>
-      api.get<MappingScheme[]>('/v1/admin/mapping-schemes').then((r) => r.data),
+      api.get<MappingScheme[]>('/v1/mapping-schemes').then((r) => r.data),
   })
 
   const createScheme = useMutation({
     mutationFn: (payload: object) =>
-      api.post<MappingScheme>('/v1/admin/mapping-schemes', payload).then((r) => r.data),
+      api.post<MappingScheme>('/v1/mapping-schemes', payload).then((r) => r.data),
     onSuccess: () => {
       toast({ title: 'Scheme created' })
       void queryClient.invalidateQueries({ queryKey: ['mapping-schemes'] })
@@ -677,77 +690,93 @@ function MappingSchemesTab() {
 
 // ── Segment Labels Tab ───────────────────────────────────────────────────────
 
-const SEGMENT_KEYS = ['fund', 'department', 'program', 'project', 'object', 'sub_object']
+interface SegmentDefinition {
+  id: number
+  segment_number: number
+  label: string
+  description: string | null
+  is_active: boolean
+}
 
 function SegmentLabelsTab() {
   const queryClient = useQueryClient()
 
-  const { data: labels, isLoading } = useQuery({
-    queryKey: ['segment-labels'],
-    queryFn: () =>
-      api.get<{ segment_key: string; label: string }[]>('/v1/admin/segment-labels').then((r) => r.data),
+  const { data: segments, isLoading } = useQuery({
+    queryKey: ['segment-definitions'],
+    queryFn: () => api.get<SegmentDefinition[]>('/v1/segment-definitions').then((r) => r.data),
   })
 
-  const updateLabel = useMutation({
-    mutationFn: ({ key, label }: { key: string; label: string }) =>
-      api.put(`/v1/admin/segment-labels/${key}`, { label }).then((r) => r.data),
+  const update = useMutation({
+    mutationFn: ({ id, ...body }: { id: number; label?: string; is_active?: boolean }) =>
+      api.put(`/v1/segment-definitions/${id}`, body).then((r) => r.data),
     onSuccess: () => {
-      toast({ title: 'Label updated' })
-      void queryClient.invalidateQueries({ queryKey: ['segment-labels'] })
+      toast({ title: 'Segment updated' })
+      void queryClient.invalidateQueries({ queryKey: ['segment-definitions'] })
     },
-    onError: () => toast({ title: 'Error', variant: 'destructive' }),
+    onError: (err) => toast({ title: 'Error', description: apiErrorMessage(err), variant: 'destructive' }),
   })
 
-  const [editValues, setEditValues] = useState<Record<string, string>>({})
+  const [editValues, setEditValues] = useState<Record<number, string>>({})
 
   if (isLoading) return <LoadingSpinner fullPage />
 
-  const getLabel = (key: string) => {
-    if (key in editValues) return editValues[key]
-    return labels?.find((l) => l.segment_key === key)?.label ?? key
+  if (!segments?.length) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Segment definitions are created when the chart of accounts is imported from the ERP connector. Import the
+        COA, then label the segments in use here (e.g. Fund, Department, GL Account) and mark unused ones inactive.
+      </p>
+    )
   }
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Customize the display names for account segment dimensions used throughout the system.
+        Label the ERP account segments (gl-acc1…gl-acc10). Labels drive column headings and report filters.
       </p>
       <div className="rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Segment Key</TableHead>
-              <TableHead>Display Label</TableHead>
+              <TableHead>Segment</TableHead>
+              <TableHead>Label</TableHead>
+              <TableHead>In use</TableHead>
               <TableHead></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {SEGMENT_KEYS.map((key) => (
-              <TableRow key={key}>
-                <TableCell className="font-mono text-sm text-muted-foreground">{key}</TableCell>
-                <TableCell>
-                  <Input
-                    value={getLabel(key)}
-                    onChange={(e) =>
-                      setEditValues((prev) => ({ ...prev, [key]: e.target.value }))
-                    }
-                    className="h-8 w-48"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      updateLabel.mutate({ key, label: getLabel(key) })
-                    }
-                    disabled={updateLabel.isPending}
-                  >
-                    Save
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
+            {[...segments]
+              .sort((a, b) => a.segment_number - b.segment_number)
+              .map((seg) => (
+                <TableRow key={seg.id}>
+                  <TableCell className="font-mono text-sm text-muted-foreground">seg{seg.segment_number}</TableCell>
+                  <TableCell>
+                    <Input
+                      value={editValues[seg.id] ?? seg.label}
+                      onChange={(e) => setEditValues((prev) => ({ ...prev, [seg.id]: e.target.value }))}
+                      className="h-8 w-48"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <input
+                      type="checkbox"
+                      aria-label={`Segment ${seg.segment_number} in use`}
+                      checked={seg.is_active}
+                      onChange={(e) => update.mutate({ id: seg.id, is_active: e.target.checked })}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => update.mutate({ id: seg.id, label: editValues[seg.id] ?? seg.label })}
+                      disabled={update.isPending}
+                    >
+                      Save
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
           </TableBody>
         </Table>
       </div>
