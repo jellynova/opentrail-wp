@@ -2,7 +2,12 @@
 from app.core.database import Base  # noqa: F401
 
 from app.models.user import User  # noqa: F401
-from app.models.period import FiscalYear, Period  # noqa: F401
+from app.models.period import (  # noqa: F401
+    FiscalYear,
+    Period,
+    PeriodClose,
+    PeriodCloseBalance,
+)
 from app.models.connector import ExternalConnector, AuditLog  # noqa: F401
 from app.models.account import Account, AccountMapping  # noqa: F401
 from app.models.segment import SegmentDefinition  # noqa: F401
@@ -21,6 +26,8 @@ __all__ = [
     "User",
     "FiscalYear",
     "Period",
+    "PeriodClose",
+    "PeriodCloseBalance",
     "ExternalConnector",
     "AuditLog",
     "Account",
