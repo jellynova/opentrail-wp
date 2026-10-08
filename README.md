@@ -59,6 +59,7 @@ alongside the requirements for local runs. The frontend type-checks and builds w
 | Working papers | Reports → Working papers | Working trial balance, leadsheets by PSAB group, AJE/RJE schedules, ZIP package |
 | Reports | Reports | Report builder (sections → row groups → rows, formula rows, comparative columns), built-in PSAB and LGDE templates, PDF/Excel export |
 | SOFI | Reports → SOFI | Supplier payments (>$25k), employee remuneration (>$75k), guarantees |
+| Tangible capital assets | Reports → Tangible capital assets | PS 3150 continuity schedule by asset class: CSV import or manual entry, year-over-year carry-forward, reconciliation to the GL |
 | Budget | Budget | Department requests, finance review, consolidation, amendments, budget-vs-actual, council report |
 | Documents | Documents | Audit-binder folders, versioning, review notes, preparer/reviewer sign-off |
 | Period close | Admin → Fiscal Years | Pre-close checks, closing balance snapshot, reopen, fiscal-year roll forward |

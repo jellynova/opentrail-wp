@@ -984,6 +984,7 @@ code stands against it and the deviations worth knowing about._
 | Phase 6 — budgeting | Requests, review, consolidation, amendments, variance, council report |
 | Phase 7 — documents | Binder folders, versioning, review notes, two-level sign-off, period close, roll forward |
 | Phase 8 — collaboration | Optimistic locking, SSE notifications, audit trail with activity views |
+| §5.2 PS 3150 — TCA schedule | Continuity schedule by asset class, CSV import, manual entry, year-over-year carry-forward, reconciliation to the GL |
 
 ### Deviations
 
@@ -997,6 +998,16 @@ code stands against it and the deviations worth knowing about._
 - **Sign-off segregation of duties**: the reviewer must be a `finance_admin` and cannot be
   the preparer. A finance_admin who prepares a paper needs an officer to sign it off
   first — the same rule the budget module applies to request reviews.
+- **TCA schedule source** (§5.2/§3.2): `fa-hdr` is empty at the surveyed AMAIS installation,
+  so the schedule is held in OpenTrail (`tca_schedule_lines`) and filled from the
+  municipality's asset register by CSV import or manual entry, rather than derived from the
+  GL. Deriving it from `capital-acct` flags was rejected: the GL carries no asset-class
+  detail, so a derived schedule could not show the continuity by class PS 3150 requires.
+  Closing cost, closing accumulated amortization and net book value are derived, and the
+  schedule is reconciled against the GL accounts classified as TCA cost / accumulated
+  amortization (`non_financial_assets.tca_cost`, `non_financial_assets.tca_amortization`) —
+  differences are reported, not enforced, since assets under construction or GL-only
+  adjustments are legitimate.
 - **SSE authentication** accepts the access token as a `token` query parameter, because
   `EventSource` cannot set an `Authorization` header. Acceptable for a locally hosted
   deployment; see the deployment guide in `README.md`.
@@ -1007,7 +1018,10 @@ code stands against it and the deviations worth knowing about._
   can be configured and tested, but `pull_coa` / `pull_trial_balance` / `pull_budget` are
   AMAIS-only and return `501 Not Implemented`. The VADIM query templates are not in this
   plan — they need the same SYSCOLUMNS-style schema confirmation the AMAIS queries got.
-- **Tangible Capital Asset schedule** (§5.2, PS 3150). `fa-hdr` is empty at the surveyed
-  AMAIS installation, so the source is still an open question (CSV asset register vs. the
-  fleet/work-management module vs. deriving from `capital-acct`).
-- **Multi-year comparative reports** beyond the budget module's multi-year view.
+  Guessing the schema would risk silently importing wrong financial data, so the pull
+  endpoints stay unimplemented until a VADIM installation can be introspected.
+
+Multi-year comparatives are available: the report builder resolves `year_offset` columns
+against the corresponding fiscal year, so any report — including the built-in PSAB
+templates, which ship a prior-year column — can compare two or more years, and the budget
+module adds its own budget/actual multi-year view (§6.3).
