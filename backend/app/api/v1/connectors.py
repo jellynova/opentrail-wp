@@ -344,6 +344,8 @@ def pull_trial_balance(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Period {data.period} not found in fiscal year {data.fiscal_year}",
         )
+    from app.api.v1.trial_balance import ensure_period_editable
+    ensure_period_editable(db, period.id)
 
     try:
         imported, updated_count, errors = tb_svc.import_from_connector(

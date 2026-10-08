@@ -230,3 +230,29 @@ def test_roll_forward_warns_without_surplus_account(client, auth, fy2025, users,
     assert summary["surplus_account"] is None and summary["balanced"] is False
     assert any("accumulated surplus" in w for w in summary["warnings"])
     assert any("no PSAB classification" in w for w in summary["warnings"])
+
+
+def test_status_changes_cannot_bypass_close_workflow(client, auth, fy2025):
+    p = period_of(fy2025, 2)
+    r = client.put(f"/api/v1/periods/{p.id}", headers=auth("admin"), json={"is_closed": True})
+    assert r.status_code == 400 and "/close" in r.json()["detail"]
+    assert client.put(f"/api/v1/fiscal-years/{fy2025.id}", headers=auth("admin"), json={"status": "closed"}).status_code == 400
+    assert client.put(f"/api/v1/fiscal-years/{fy2025.id}", headers=auth("admin"), json={"status": "locked"}).status_code == 400
+    # Renames still work
+    assert client.put(f"/api/v1/periods/{p.id}", headers=auth("admin"), json={"name": "Feb"}).status_code == 200
+
+
+def test_closed_period_blocks_trial_balance_imports(client, auth, db, fy2025):
+    p = period_of(fy2025, 1)
+    p.is_closed = True
+    db.commit()
+    csv = b"Account,Debit,Credit\n1000,10,0\n"
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?period_id={p.id}&fiscal_year_id={fy2025.id}",
+        headers=auth("officer"), files={"file": ("tb.csv", csv, "text/csv")},
+    )
+    assert r.status_code == 400 and "closed" in r.json()["detail"]
+    r = client.post("/api/v1/trial-balance/import/connector", headers=auth("officer"), json={
+        "connector_id": 1, "fiscal_year_id": fy2025.id, "period_id": p.id, "fiscal_year": 2025, "period_number": 1,
+    })
+    assert r.status_code == 400

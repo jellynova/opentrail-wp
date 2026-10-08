@@ -135,10 +135,18 @@ def update_fiscal_year(
         fy.start_date = data.start_date
     if data.end_date is not None:
         fy.end_date = data.end_date
-    if data.status is not None:
+    if data.status is not None and data.status != fy.status:
         valid_statuses = {"open", "closed", "locked"}
         if data.status not in valid_statuses:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid status: {data.status}")
+        if data.status == "closed":
+            # Closing runs the pre-close checks and snapshots balances (PLAN §7.3)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Use POST /fiscal-years/{id}/close to close a fiscal year",
+            )
+        if data.status == "locked" and fy.status != "closed":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only a closed fiscal year can be locked")
         fy.status = data.status
 
     db.flush()
@@ -249,8 +257,12 @@ def update_period(
         period.start_date = data.start_date
     if data.end_date is not None:
         period.end_date = data.end_date
-    if data.is_closed is not None:
-        period.is_closed = data.is_closed
+    if data.is_closed is not None and data.is_closed != period.is_closed:
+        # Closing snapshots balances and reopening is audited with a reason (PLAN §7.3)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use POST /periods/{id}/close or /periods/{id}/reopen to change whether a period is closed",
+        )
 
     db.flush()
     audit_svc.record(

@@ -24,6 +24,20 @@ from app.services import trial_balance as tb_svc
 router = APIRouter()
 
 
+def ensure_period_editable(db: Session, period_id: int) -> Period:
+    """Closed periods (and closed/locked years) are frozen: reopen before changing figures."""
+    period = db.get(Period, period_id)
+    if period is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Period not found")
+    fy = db.get(FiscalYear, period.fiscal_year_id)
+    if period.is_closed or (fy is not None and fy.status in ("closed", "locked")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Period '{period.name}' is closed; reopen it before changing its trial balance",
+        )
+    return period
+
+
 @router.get("/trial-balance", response_model=List[TrialBalanceEntryResponse])
 def get_trial_balance(
     period_id: int = Query(..., description="Period ID to retrieve trial balance for"),
@@ -64,6 +78,7 @@ async def import_csv(
         ytd_credit_col: "ytd_credit",
     }
 
+    ensure_period_editable(db, period_id)
     content = await file.read()
     imported, updated, errors = tb_svc.import_from_csv(
         db=db,
@@ -94,6 +109,7 @@ def import_from_connector(
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
     """Pull trial balance from an external connector and upsert entries."""
+    ensure_period_editable(db, data.period_id)
     imported, updated, errors = tb_svc.import_from_connector(
         db=db,
         connector_id=data.connector_id,
@@ -149,14 +165,7 @@ def update_entry(
             headers={"X-Conflict-Reason": "stale-version"},
         )
 
-    period = db.get(Period, entry.period_id)
-    if period is not None:
-        fy = db.get(FiscalYear, period.fiscal_year_id)
-        if period.is_closed or (fy is not None and fy.status in ("closed", "locked")):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Period '{period.name}' is closed; reopen it before editing its trial balance",
-            )
+    ensure_period_editable(db, entry.period_id)
 
     payload = data.model_dump(exclude_unset=True, exclude={"version"})
     before = audit_svc.snapshot(entry, list(payload))
