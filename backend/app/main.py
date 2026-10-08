@@ -28,6 +28,7 @@ from app.api.v1 import (
     connectors,
     working_papers,
     sofi,
+    tca,
     events,
 )
 
@@ -149,6 +150,9 @@ app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
 
 # Live activity notifications (SSE)
 app.include_router(events.router, prefix="/api/v1", tags=["events"])
+
+# Tangible capital asset schedule (PS 3150)
+app.include_router(tca.router, prefix="/api/v1", tags=["tca"])
 
 # Audit trail / activity log
 app.include_router(audit.router, prefix="/api/v1", tags=["audit"])

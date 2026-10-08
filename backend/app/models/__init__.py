@@ -20,6 +20,7 @@ from app.models.budget import (  # noqa: F401
 )
 from app.models.report import Report  # noqa: F401
 from app.models.sofi import SofiEntry  # noqa: F401
+from app.models.tca import TcaScheduleLine  # noqa: F401
 
 __all__ = [
     "Base",
@@ -47,4 +48,5 @@ __all__ = [
     "BudgetAmendmentLine",
     "Report",
     "SofiEntry",
+    "TcaScheduleLine",
 ]
