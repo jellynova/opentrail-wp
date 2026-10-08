@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -7,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import Base, engine, SessionLocal
+from app.core.schema_sync import sync_columns
 from app.core.security import hash_password
+logger = logging.getLogger(__name__)
+
 from app.api.v1 import (
     audit,
     auth,
@@ -27,9 +31,20 @@ from app.api.v1 import (
 
 
 def _init_db() -> None:
-    """Create all tables, seed a default admin user if none exist, and seed built-in report templates."""
+    """
+    Create all tables, add any columns an existing installation is missing, seed a default
+    admin user if none exist, and seed built-in report templates.
+    """
     import app.models  # noqa: F401 — ensures all models are registered with Base.metadata
     Base.metadata.create_all(bind=engine)
+
+    # create_all does not add columns to tables that already exist, so an upgrade would
+    # otherwise fail at query time on any newly introduced column.
+    added = sync_columns(engine)
+    if added:
+        # Warning level on purpose: this only happens on an upgrade, and the operator
+        # should be able to see it in the container logs.
+        logger.warning("Schema sync added %d column(s): %s", len(added), ", ".join(added))
 
     db = SessionLocal()
     try:
