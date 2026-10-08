@@ -418,3 +418,60 @@ export interface SegmentLabel {
   label: string
   is_active: boolean
 }
+
+/** PS 3150 tangible capital asset schedule (PLAN §5.2). */
+export interface TcaLine {
+  id: number
+  fiscal_year_id: number
+  asset_class: string
+  sort_order: number
+  notes: string | null
+  cost_opening: string
+  cost_additions: string
+  cost_disposals: string
+  cost_closing: string
+  amort_opening: string
+  amort_expense: string
+  amort_disposals: string
+  amort_closing: string
+  nbv_opening: string
+  nbv_closing: string
+  source: string
+}
+
+/** Editable amounts for one asset class (the derived figures are computed server-side). */
+export interface TcaLineInput {
+  asset_class: string
+  cost_opening: string
+  cost_additions: string
+  cost_disposals: string
+  amort_opening: string
+  amort_expense: string
+  amort_disposals: string
+  notes?: string | null
+}
+
+export interface TcaReconciliation {
+  available: boolean
+  reason?: string
+  gl_cost?: string
+  gl_accumulated_amortization?: string
+  schedule_cost?: string
+  schedule_accumulated_amortization?: string
+  cost_difference?: string
+  amortization_difference?: string
+  agrees?: boolean
+}
+
+export interface TcaScheduleReport extends ReportOutput {
+  layout: 'continuity' | 'summary'
+  reconciliation: TcaReconciliation
+  line_count: number
+}
+
+export interface TcaRollForwardResult {
+  applied: number
+  created: number
+  prior_year: string | null
+  warnings: string[]
+}

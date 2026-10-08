@@ -1,5 +1,19 @@
 import { useMemo, useState } from 'react'
-import { Copy, Download, FileArchive, FileText, Lock, Play, Plus, RotateCcw, Save, Trash2, Upload } from 'lucide-react'
+import {
+  AlertTriangle,
+  Copy,
+  Download,
+  FileArchive,
+  FileText,
+  Lock,
+  Pencil,
+  Play,
+  Plus,
+  RotateCcw,
+  Save,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ReportView } from '@/components/shared/ReportView'
@@ -10,6 +24,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
 import {
@@ -25,11 +40,12 @@ import {
   useValidateDefinition,
   type SofiScheduleType,
 } from '@/hooks/useReports'
-import { apiErrorMessage } from '@/lib/utils'
+import { useImportTca, useRollForwardTca, useSaveTcaLines, useTcaLines, useTcaSchedule, type TcaLayout } from '@/hooks/useTca'
+import { apiErrorMessage, cn, formatAmount } from '@/lib/utils'
 import { downloadFile } from '@/lib/download'
 import { useAuthStore } from '@/store/auth'
 import { toast } from '@/hooks/useToast'
-import type { Report, ReportOutput } from '@/types'
+import type { Report, ReportOutput, TcaLine, TcaLineInput } from '@/types'
 
 const FINANCE = ['finance_admin', 'finance_officer']
 
@@ -583,18 +599,332 @@ function SofiTab() {
   )
 }
 
+const TCA_FIELDS = [
+  { key: 'cost_opening', label: 'Cost — opening' },
+  { key: 'cost_additions', label: 'Additions' },
+  { key: 'cost_disposals', label: 'Disposals' },
+  { key: 'amort_opening', label: 'Accum. amort. — opening' },
+  { key: 'amort_expense', label: 'Amortization' },
+  { key: 'amort_disposals', label: 'Amort. disposals' },
+] as const
+
+const EMPTY_TCA_LINE: TcaLineInput = {
+  asset_class: '',
+  cost_opening: '0',
+  cost_additions: '0',
+  cost_disposals: '0',
+  amort_opening: '0',
+  amort_expense: '0',
+  amort_disposals: '0',
+}
+
+/** Manual entry for the continuity schedule (CSV import is the usual path). */
+function TcaEditor({
+  fiscalYearId,
+  lines,
+  onClose,
+}: {
+  fiscalYearId: number
+  lines: TcaLine[]
+  onClose: () => void
+}) {
+  const [rows, setRows] = useState<TcaLineInput[]>(
+    lines.length
+      ? lines.map((l) => ({
+          asset_class: l.asset_class,
+          cost_opening: l.cost_opening,
+          cost_additions: l.cost_additions,
+          cost_disposals: l.cost_disposals,
+          amort_opening: l.amort_opening,
+          amort_expense: l.amort_expense,
+          amort_disposals: l.amort_disposals,
+        }))
+      : [{ ...EMPTY_TCA_LINE }]
+  )
+  const save = useSaveTcaLines(fiscalYearId)
+
+  const update = (index: number, patch: Partial<TcaLineInput>) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        One row per asset class. Closing cost, closing accumulated amortization and net book value are
+        calculated. Negative additions/disposals are allowed; use the Disposals columns for retirements.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-xs text-muted-foreground">
+              <th className="py-1 pr-2">Asset class</th>
+              {TCA_FIELDS.map((f) => (
+                <th key={f.key} className="py-1 pr-2 text-right">
+                  {f.label}
+                </th>
+              ))}
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={index} className="border-b last:border-0">
+                <td className="py-1 pr-2">
+                  <Input
+                    className="h-8 min-w-40"
+                    value={row.asset_class}
+                    placeholder="Buildings"
+                    onChange={(e) => update(index, { asset_class: e.target.value })}
+                  />
+                </td>
+                {TCA_FIELDS.map((f) => (
+                  <td key={f.key} className="py-1 pr-2">
+                    <Input
+                      className="h-8 w-28 text-right"
+                      inputMode="decimal"
+                      value={row[f.key]}
+                      onChange={(e) => update(index, { [f.key]: e.target.value })}
+                    />
+                  </td>
+                ))}
+                <td>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8"
+                    title="Remove row"
+                    onClick={() => setRows((current) => current.filter((_, i) => i !== index))}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex gap-2">
+        <Button variant="outline" size="sm" onClick={() => setRows((current) => [...current, { ...EMPTY_TCA_LINE }])}>
+          <Plus className="mr-1 h-4 w-4" /> Add asset class
+        </Button>
+        <div className="flex-1" />
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          size="sm"
+          disabled={save.isPending}
+          onClick={() => {
+            const cleaned = rows.filter((r) => r.asset_class.trim())
+            if (cleaned.length !== rows.length) {
+              toast({ title: 'Every row needs an asset class', variant: 'destructive' })
+              return
+            }
+            save.mutate(cleaned, {
+              onSuccess: (r) => {
+                toast({ title: `Saved ${r.lines_saved} asset classes` })
+                onClose()
+              },
+              onError: onError('Could not save the schedule'),
+            })
+          }}
+        >
+          <Save className="mr-1 h-4 w-4" /> Save schedule
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function TcaTab() {
+  const { hasRole } = useAuthStore()
+  const { data: fiscalYears } = useFiscalYears()
+  const [fy, setFy] = useState<number | null>(null)
+  const [layout, setLayout] = useState<TcaLayout>('continuity')
+  const [editing, setEditing] = useState(false)
+  const { data: lines } = useTcaLines(fy)
+  const { data: schedule, isLoading } = useTcaSchedule(fy, layout)
+  const importMutation = useImportTca(fy)
+  const rollForward = useRollForwardTca(fy)
+  const year = fiscalYears?.find((y) => y.id === fy)
+  const readOnly = year?.status === 'locked'
+  const rec = schedule?.reconciliation
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-muted-foreground">Fiscal year</label>
+          <Select value={fy?.toString() ?? ''} onValueChange={(v) => setFy(Number(v))}>
+            <SelectTrigger className="w-40">
+              <SelectValue placeholder="Select year" />
+            </SelectTrigger>
+            <SelectContent>
+              {fiscalYears?.map((y) => (
+                <SelectItem key={y.id} value={y.id.toString()}>
+                  {y.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-muted-foreground">Layout</label>
+          <Select value={layout} onValueChange={(v) => setLayout(v as TcaLayout)}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="continuity">Cost &amp; amortization continuity</SelectItem>
+              <SelectItem value="summary">Closing figures only</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {hasRole(FINANCE) && fy && !readOnly && (
+          <>
+            <label className="inline-flex cursor-pointer items-center rounded-md border px-3 py-2 text-sm hover:bg-muted">
+              <Upload className="mr-2 h-4 w-4" /> Import CSV (replaces year)
+              <input
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  e.target.value = ''
+                  if (!file) return
+                  importMutation.mutate(
+                    { file, replace: true },
+                    {
+                      onSuccess: (r) =>
+                        toast({
+                          title: `Imported ${r.records_imported} asset classes`,
+                          description: r.errors.length ? r.errors.slice(0, 3).join('; ') : undefined,
+                          variant: r.errors.length ? 'destructive' : undefined,
+                        }),
+                      onError: onError('Import failed'),
+                    }
+                  )
+                }}
+              />
+            </label>
+            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+              <Pencil className="mr-1 h-4 w-4" /> Edit schedule
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={rollForward.isPending}
+              onClick={() =>
+                rollForward.mutate(undefined, {
+                  onSuccess: (r) =>
+                    toast({
+                      title: r.applied
+                        ? `Carried ${r.prior_year} closing balances into this year`
+                        : 'Nothing carried forward',
+                      description: r.warnings.length ? r.warnings.join('; ') : undefined,
+                      variant: r.warnings.length ? 'destructive' : undefined,
+                    }),
+                  onError: onError('Roll forward failed'),
+                })
+              }
+            >
+              <RotateCcw className="mr-1 h-4 w-4" /> Carry forward openings
+            </Button>
+          </>
+        )}
+        <div className="flex-1" />
+        {fy &&
+          (['xlsx', 'pdf'] as const).map((format) => (
+            <Button
+              key={format}
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void downloadFile(`/v1/tca/schedule`, `TCA_${year?.label ?? ''}.${format}`, {
+                  params: { fiscal_year_id: fy, layout, format },
+                }).catch(onError('Export failed'))
+              }
+            >
+              <Download className="mr-1 h-3 w-3" /> {format === 'xlsx' ? 'Excel' : 'PDF'}
+            </Button>
+          ))}
+      </div>
+
+      {fy && rec?.available && (
+        <div
+          className={cn(
+            'rounded-md border p-3 text-sm',
+            rec.agrees
+              ? 'border-green-300 bg-green-50 text-green-900'
+              : 'border-yellow-300 bg-yellow-50 text-yellow-900'
+          )}
+        >
+          {rec.agrees ? (
+            <span>
+              Ties to the GL: cost {formatAmount(Number(rec.gl_cost))}, accumulated amortization{' '}
+              {formatAmount(Number(rec.gl_accumulated_amortization))}.
+            </span>
+          ) : (
+            <span className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                Does not agree with the GL accounts classified as TCA cost / accumulated amortization:
+                cost differs by {formatAmount(Number(rec.cost_difference))}, accumulated amortization by{' '}
+                {formatAmount(Number(rec.amortization_difference))}. The schedule total may include assets
+                under construction, or the GL may carry an adjustment not yet in the register.
+              </span>
+            </span>
+          )}
+        </div>
+      )}
+      {fy && rec && !rec.available && (
+        <p className="text-xs text-muted-foreground">
+          No accounts are classified as TCA cost / accumulated amortization in the PSAB scheme, so the
+          schedule cannot be reconciled to the GL yet.
+        </p>
+      )}
+
+      {!fy ? (
+        <p className="text-sm text-muted-foreground">Select a fiscal year to view its schedule.</p>
+      ) : isLoading ? (
+        <LoadingSpinner fullPage />
+      ) : schedule && schedule.line_count === 0 ? (
+        <div className="rounded-lg border bg-card p-10 text-center">
+          <p className="text-sm text-muted-foreground">
+            No tangible capital asset schedule for this year yet. Import the asset register as CSV, or add
+            the asset classes manually.
+          </p>
+        </div>
+      ) : (
+        schedule && <ReportView report={schedule} />
+      )}
+
+      {editing && fy && (
+        <Dialog open onOpenChange={(open) => !open && setEditing(false)}>
+          <DialogContent className="max-w-5xl">
+            <DialogHeader>
+              <DialogTitle>Tangible capital asset schedule — {year?.label}</DialogTitle>
+            </DialogHeader>
+            <TcaEditor fiscalYearId={fy} lines={lines ?? []} onClose={() => setEditing(false)} />
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
+  )
+}
+
 export function ReportsPage() {
   return (
     <div className="space-y-4">
       <PageHeader
         title="Reports"
-        description="PSAB and LGDE financial statements, custom reports, working papers and SOFI schedules"
+        description="PSAB and LGDE financial statements, custom reports, working papers, SOFI schedules and the tangible capital asset schedule"
       />
       <Tabs defaultValue="statements">
         <TabsList>
           <TabsTrigger value="statements">Statements &amp; reports</TabsTrigger>
           <TabsTrigger value="working-papers">Working papers</TabsTrigger>
           <TabsTrigger value="sofi">SOFI schedules</TabsTrigger>
+          <TabsTrigger value="tca">Tangible capital assets</TabsTrigger>
         </TabsList>
         <TabsContent value="statements" className="mt-4">
           <StatementsTab />
@@ -604,6 +934,9 @@ export function ReportsPage() {
         </TabsContent>
         <TabsContent value="sofi" className="mt-4">
           <SofiTab />
+        </TabsContent>
+        <TabsContent value="tca" className="mt-4">
+          <TcaTab />
         </TabsContent>
       </Tabs>
     </div>
