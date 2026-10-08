@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select, and_, delete
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from app.models.account import Account, AccountMapping
 from app.models.mapping import AccountClassification, MappingScheme
 from app.models.segment import SegmentDefinition
 from app.models.user import User
+from app.services import audit as audit_svc
 from app.schemas.account import (
     AccountCreate,
     AccountUpdate,
@@ -47,12 +48,24 @@ def list_accounts(
 @router.post("/accounts", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
 def create_account(
     data: AccountCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
     account = Account(**data.model_dump())
     db.add(account)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="account",
+        resource_id=account.id,
+        new={"acct_fmtd": account.acct_fmtd, "description": account.description},
+        summary=f"created account {account.acct_fmtd}",
+        request=request,
+        commit=True,
+    )
     db.refresh(account)
     return account
 
@@ -73,6 +86,7 @@ def get_account(
 def update_account(
     account_id: int,
     data: AccountUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -80,10 +94,24 @@ def update_account(
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    before = audit_svc.snapshot(account, list(payload))
+    for field, value in payload.items():
         setattr(account, field, value)
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="account",
+        resource_id=account.id,
+        old=before,
+        new=audit_svc.snapshot(account, list(payload)),
+        summary=f"updated account {account.acct_fmtd}",
+        request=request,
+        commit=True,
+    )
     db.refresh(account)
     return account
 
@@ -103,12 +131,24 @@ def list_mapping_schemes(
 @router.post("/mapping-schemes", response_model=MappingSchemeResponse, status_code=status.HTTP_201_CREATED)
 def create_mapping_scheme(
     data: MappingSchemeCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
     scheme = MappingScheme(name=data.name, description=data.description)
     db.add(scheme)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="mapping_scheme",
+        resource_id=scheme.id,
+        new={"name": scheme.name, "description": scheme.description},
+        summary=f"created mapping scheme {scheme.name}",
+        request=request,
+        commit=True,
+    )
     db.refresh(scheme)
     return scheme
 
@@ -133,6 +173,7 @@ def list_classifications(
 def update_account_classifications(
     account_id: int,
     data: AccountClassificationUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -140,6 +181,14 @@ def update_account_classifications(
     account = db.get(Account, account_id)
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    existing = db.scalars(
+        select(AccountClassification).where(AccountClassification.account_id == account_id)
+    ).all()
+    before = [
+        {"scheme_id": c.scheme_id, "classification_value": c.classification_value, "sort_order": c.sort_order}
+        for c in existing
+    ]
 
     # Delete existing classifications for this account
     db.execute(delete(AccountClassification).where(AccountClassification.account_id == account_id))
@@ -161,7 +210,24 @@ def update_account_classifications(
         db.add(cl)
         new_classifications.append(cl)
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="classify",
+        resource_type="account",
+        resource_id=account_id,
+        old={"classifications": before},
+        new={
+            "classifications": [
+                {"scheme_id": c.scheme_id, "classification_value": c.classification_value}
+                for c in new_classifications
+            ]
+        },
+        summary=f"updated the mapping classifications for account {account.acct_fmtd}",
+        request=request,
+        commit=True,
+    )
     for cl in new_classifications:
         db.refresh(cl)
     return new_classifications
@@ -187,6 +253,7 @@ def list_segment_definitions(
 def update_segment_definition(
     seg_id: int,
     data: SegmentDefinitionUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -194,9 +261,23 @@ def update_segment_definition(
     if seg is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment definition not found")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    before = audit_svc.snapshot(seg, list(payload))
+    for field, value in payload.items():
         setattr(seg, field, value)
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="segment_definition",
+        resource_id=seg.id,
+        old=before,
+        new=audit_svc.snapshot(seg, list(payload)),
+        summary=f"relabelled GL segment {seg.segment_number} as '{seg.label}'",
+        request=request,
+        commit=True,
+    )
     db.refresh(seg)
     return seg

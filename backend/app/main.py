@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -8,6 +9,7 @@ from app.core.config import settings
 from app.core.database import Base, engine, SessionLocal
 from app.core.security import hash_password
 from app.api.v1 import (
+    audit,
     auth,
     users,
     periods,
@@ -20,6 +22,7 @@ from app.api.v1 import (
     connectors,
     working_papers,
     sofi,
+    events,
 )
 
 
@@ -53,7 +56,15 @@ def _init_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _init_db()
-    yield
+    # The SSE broker publishes from sync request handlers running in a threadpool, so it
+    # needs a handle on this loop (PLAN §8.2).
+    from app.services import events as events_svc
+
+    events_svc.set_loop(asyncio.get_running_loop())
+    try:
+        yield
+    finally:
+        events_svc.set_loop(None)
 
 app = FastAPI(
     lifespan=lifespan,
@@ -108,6 +119,12 @@ app.include_router(sofi.router, prefix="/api/v1", tags=["sofi"])
 
 # Documents / Working Papers
 app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
+
+# Live activity notifications (SSE)
+app.include_router(events.router, prefix="/api/v1", tags=["events"])
+
+# Audit trail / activity log
+app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
 
 
 @app.get("/health", tags=["health"])

@@ -1,5 +1,5 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role, hash_password
 from app.models.user import User
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, PasswordChange
+from app.services import audit as audit_svc
 
 router = APIRouter()
 
@@ -23,6 +24,7 @@ def list_users(
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def create_user(
     data: UserCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -48,7 +50,18 @@ def create_user(
         is_active=True,
     )
     db.add(user)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="user",
+        resource_id=user.id,
+        new={"username": user.username, "role": user.role, "department": user.department},
+        summary=f"created user {user.username} ({user.role})",
+        request=request,
+        commit=True,
+    )
     db.refresh(user)
     return user
 
@@ -69,6 +82,7 @@ def get_user(
 def update_user(
     user_id: int,
     data: UserUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -76,6 +90,7 @@ def update_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    before = audit_svc.snapshot(user, ["email", "role", "department", "is_active"])
 
     if data.email is not None:
         conflict = db.scalars(select(User).where(User.email == data.email, User.id != user_id)).first()
@@ -95,7 +110,19 @@ def update_user(
     if data.is_active is not None:
         user.is_active = data.is_active
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="user",
+        resource_id=user.id,
+        old=before,
+        new=audit_svc.snapshot(user, ["email", "role", "department", "is_active"]),
+        summary=f"updated user {user.username}",
+        request=request,
+        commit=True,
+    )
     db.refresh(user)
     return user
 
@@ -103,6 +130,7 @@ def update_user(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def deactivate_user(
     user_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -113,13 +141,24 @@ def deactivate_user(
     if user.id == current_user.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate yourself")
     user.is_active = False
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="deactivate",
+        resource_type="user",
+        resource_id=user.id,
+        new={"username": user.username, "is_active": False},
+        summary=f"deactivated user {user.username}",
+        request=request,
+        commit=True,
+    )
 
 
 @router.put("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
 def change_password(
     user_id: int,
     data: PasswordChange,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -135,4 +174,14 @@ def change_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
 
     user.hashed_password = hash_password(data.new_password)
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="password_change",
+        resource_type="user",
+        resource_id=user.id,
+        new={"username": user.username},
+        summary=f"changed the password for {user.username}",
+        request=request,
+        commit=True,
+    )

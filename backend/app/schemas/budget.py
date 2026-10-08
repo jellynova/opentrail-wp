@@ -46,6 +46,8 @@ class BudgetRequestCreate(BaseModel):
 
 class BudgetRequestUpdate(BaseModel):
     # Status changes go through the submit / approve / reject / return endpoints only.
+    # Optimistic locking (PLAN §8.1): the version the client loaded.
+    version: Optional[int] = None
     proposed_amount: Optional[Decimal] = Field(None, ge=0)
     justification_text: Optional[str] = None
     supporting_notes: Optional[str] = None
@@ -76,6 +78,7 @@ class BudgetRequestResponse(BaseModel):
     review_comment: Optional[str]
     status: str
     approved_amount: Optional[Decimal]
+    version: int = 1
 
     model_config = {"from_attributes": True}
 

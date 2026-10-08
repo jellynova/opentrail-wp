@@ -17,11 +17,15 @@ class TrialBalanceEntryResponse(BaseModel):
     source: str
     imported_at: datetime
     connector_id: Optional[int]
+    version: int = 1
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 class TrialBalanceEntryUpdate(BaseModel):
+    # Optimistic locking (PLAN §8.1): the version the client loaded.
+    version: Optional[int] = None
     opening_debit: Optional[Decimal] = None
     opening_credit: Optional[Decimal] = None
     period_debit: Optional[Decimal] = None

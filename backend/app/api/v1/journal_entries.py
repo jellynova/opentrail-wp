@@ -1,7 +1,7 @@
 import re
 from decimal import Decimal
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,8 @@ from app.models.account import Account
 from app.models.journal_entry import JournalEntry, JournalLine
 from app.models.period import FiscalYear, Period
 from app.models.user import User
+from app.services import audit as audit_svc
+from app.services import locking
 from app.schemas.journal_entry import (
     JournalEntryCreate,
     JournalEntryUpdate,
@@ -27,6 +29,33 @@ REFERENCE_PREFIX = {
     "elimination": "EJE",
     "budget_variance": "BJE",
 }
+
+
+def _conflict(exc: "locking.VersionConflict") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=str(exc),
+        headers={"X-Conflict-Reason": "stale-version"},
+    )
+
+
+def _entry_snapshot(entry: JournalEntry) -> dict:
+    return {
+        "reference": entry.reference,
+        "description": entry.description,
+        "entry_type": entry.entry_type,
+        "status": entry.status,
+        "period_id": entry.period_id,
+        "lines": [
+            {
+                "account_id": l.account_id,
+                "debit": str(l.debit),
+                "credit": str(l.credit),
+                "description": l.description,
+            }
+            for l in entry.lines
+        ],
+    }
 
 
 def _get_entry_or_404(db: Session, entry_id: int) -> JournalEntry:
@@ -120,6 +149,7 @@ def list_journal_entries(
 @router.post("/journal-entries", response_model=JournalEntryResponse, status_code=status.HTTP_201_CREATED)
 def create_journal_entry(
     data: JournalEntryCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -142,7 +172,18 @@ def create_journal_entry(
     db.add(entry)
     db.flush()  # get entry.id
     _add_lines(db, entry, data.lines)
+    db.flush()
 
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        new=_entry_snapshot(entry),
+        summary=f"created journal entry {entry.reference or entry.id}",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry
@@ -161,17 +202,23 @@ def get_journal_entry(
 def update_journal_entry(
     entry_id: int,
     data: JournalEntryUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
     """Update a journal entry. Only permitted when status is 'draft'."""
     entry = _get_entry_or_404(db, entry_id)
+    try:
+        locking.check_version(entry, data.version, "journal entry")
+    except locking.VersionConflict as exc:
+        raise _conflict(exc)
     if entry.status != "draft":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot edit a journal entry with status '{entry.status}'",
         )
     period = _get_open_period(db, entry.period_id)
+    before = _entry_snapshot(entry)
 
     if data.entry_date is not None:
         entry.entry_date = data.entry_date
@@ -192,6 +239,19 @@ def update_journal_entry(
         db.flush()
         _add_lines(db, entry, data.lines)
 
+    db.flush()
+    locking.bump(entry)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        old=before,
+        new=_entry_snapshot(entry),
+        summary=f"edited journal entry {entry.reference or entry.id}",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry
@@ -200,6 +260,7 @@ def update_journal_entry(
 @router.delete("/journal-entries/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_journal_entry(
     entry_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -210,6 +271,16 @@ def delete_journal_entry(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Only draft entries can be deleted; current status is '{entry.status}'",
         )
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        old=_entry_snapshot(entry),
+        summary=f"deleted draft journal entry {entry.reference or entry.id}",
+        request=request,
+    )
     db.delete(entry)
     db.commit()
 
@@ -217,6 +288,7 @@ def delete_journal_entry(
 @router.post("/journal-entries/{entry_id}/post", response_model=JournalEntryResponse)
 def post_journal_entry(
     entry_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -245,6 +317,18 @@ def post_journal_entry(
         )
 
     entry.status = "posted"
+    db.flush()
+    locking.bump(entry)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="post",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        new={"status": "posted", "total_debit": str(total_debit), "total_credit": str(total_credit)},
+        summary=f"posted journal entry {entry.reference or entry.id}",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry
@@ -253,6 +337,7 @@ def post_journal_entry(
 @router.post("/journal-entries/{entry_id}/unpost", response_model=JournalEntryResponse)
 def unpost_journal_entry(
     entry_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -269,8 +354,22 @@ def unpost_journal_entry(
         )
     _get_open_period(db, entry.period_id)
 
+    previous_status = entry.status
     entry.status = "draft"
     entry.reviewed_by_user_id = None
+    db.flush()
+    locking.bump(entry)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="unpost",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        old={"status": previous_status},
+        new={"status": "draft"},
+        summary=f"returned journal entry {entry.reference or entry.id} to draft",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry
@@ -279,6 +378,7 @@ def unpost_journal_entry(
 @router.post("/journal-entries/{entry_id}/approve", response_model=JournalEntryResponse)
 def approve_journal_entry(
     entry_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -297,6 +397,18 @@ def approve_journal_entry(
 
     entry.status = "approved"
     entry.reviewed_by_user_id = current_user.id
+    db.flush()
+    locking.bump(entry)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="approve",
+        resource_type="journal_entry",
+        resource_id=entry.id,
+        new={"status": "approved", "reviewed_by_user_id": current_user.id},
+        summary=f"approved journal entry {entry.reference or entry.id}",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry

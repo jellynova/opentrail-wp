@@ -19,6 +19,8 @@ class JournalEntry(Base):
     prepared_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     reviewed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")  # draft / posted / approved
+    # Optimistic locking (PLAN §8.1) — see TrialBalanceEntry.version.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

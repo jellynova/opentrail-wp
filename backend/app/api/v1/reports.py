@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.schemas.report import (
     ReportGenerateRequest,
     ReportGenerateResponse,
 )
+from app.services import audit as audit_svc
 from app.services.report_engine import ReportDefinitionError, validate_definition
 from app.services.report_generator import export_to_excel, export_to_pdf, generate_report_data, safe_filename
 
@@ -83,6 +84,7 @@ def list_reports(
 @router.post("/reports", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
 def create_report(
     data: ReportCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -100,7 +102,18 @@ def create_report(
         updated_at=now,
     )
     db.add(report)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="report",
+        resource_id=report.id,
+        new={"name": report.name, "report_type": report.report_type, "fiscal_year_id": report.fiscal_year_id},
+        summary=f"created report '{report.name}'",
+        request=request,
+        commit=True,
+    )
     db.refresh(report)
     return report
 
@@ -149,6 +162,7 @@ def get_report(
 def update_report(
     report_id: int,
     data: ReportUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -161,11 +175,25 @@ def update_report(
     updates = data.model_dump(exclude_unset=True)
     if updates.get("definition") is not None:
         _check_definition(updates["definition"])
+    before = {"name": report.name, "description": report.description}
+    definition_changed = updates.get("definition") is not None
     for field, value in updates.items():
         setattr(report, field, value)
     report.updated_at = datetime.now(timezone.utc)
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="report",
+        resource_id=report.id,
+        old=before,
+        new={"name": report.name, "description": report.description, "definition_changed": definition_changed},
+        summary=f"edited report '{report.name}'",
+        request=request,
+        commit=True,
+    )
     db.refresh(report)
     return report
 
@@ -173,12 +201,23 @@ def update_report(
 @router.delete("/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_report(
     report_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
     report = _get_report_or_404(db, report_id)
     if report.is_protected:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Built-in templates cannot be deleted")
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="report",
+        resource_id=report.id,
+        old={"name": report.name, "report_type": report.report_type},
+        summary=f"deleted report '{report.name}'",
+        request=request,
+    )
     db.delete(report)
     db.commit()
 
@@ -186,6 +225,7 @@ def delete_report(
 @router.post("/reports/{report_id}/clone", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
 def clone_report(
     report_id: int,
+    request: Request,
     name: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
@@ -209,7 +249,19 @@ def clone_report(
         updated_at=now,
     )
     db.add(copy)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="clone",
+        resource_type="report",
+        resource_id=copy.id,
+        old={"source_report_id": source.id, "name": source.name},
+        new={"name": copy.name},
+        summary=f"cloned report '{source.name}' as '{copy.name}'",
+        request=request,
+        commit=True,
+    )
     db.refresh(copy)
     return copy
 
@@ -217,6 +269,7 @@ def clone_report(
 @router.post("/reports/{report_id}/revert", response_model=ReportResponse)
 def revert_report(
     report_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -232,7 +285,18 @@ def revert_report(
     definition["source_template_key"] = definition.pop("template_key")
     report.definition = definition
     report.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="revert",
+        resource_type="report",
+        resource_id=report.id,
+        new={"name": report.name, "template_key": key},
+        summary=f"reverted report '{report.name}' to the standard template",
+        request=request,
+        commit=True,
+    )
     db.refresh(report)
     return report
 

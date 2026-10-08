@@ -39,6 +39,9 @@ class BudgetRequest(Base):
         String(30), nullable=False, default="draft"
     )  # draft / submitted / approved / modified / rejected
     approved_amount: Mapped[Optional[float]] = mapped_column(Numeric(15, 2), nullable=True)
+    # Optimistic locking (PLAN §8.1) — see TrialBalanceEntry.version.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class BudgetLine(Base):

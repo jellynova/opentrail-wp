@@ -1,5 +1,7 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,9 @@ from app.schemas.trial_balance import (
     ConnectorImportRequest,
     ImportResult,
 )
+from app.models.period import FiscalYear, Period
+from app.services import audit as audit_svc
+from app.services import locking
 from app.services import trial_balance as tb_svc
 
 router = APIRouter()
@@ -34,6 +39,7 @@ def get_trial_balance(
 
 @router.post("/trial-balance/import/csv", response_model=ImportResult)
 async def import_csv(
+    request: Request,
     period_id: int = Query(...),
     fiscal_year_id: int = Query(...),
     acct_fmtd_col: str = Query("Account", description="CSV column name for account identifier"),
@@ -66,12 +72,24 @@ async def import_csv(
         column_mapping=column_mapping,
         fiscal_year_id=fiscal_year_id,
     )
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="import",
+        resource_type="trial_balance",
+        resource_id=period_id,
+        new={"source": "csv", "imported": imported, "updated": updated, "errors": len(errors)},
+        summary=f"imported a trial balance from CSV ({imported} new, {updated} updated)",
+        request=request,
+        commit=True,
+    )
     return ImportResult(records_imported=imported, records_updated=updated, errors=errors)
 
 
 @router.post("/trial-balance/import/connector", response_model=ImportResult)
 def import_from_connector(
     data: ConnectorImportRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -84,6 +102,23 @@ def import_from_connector(
         fiscal_year=data.fiscal_year,
         period_number=data.period_number,
     )
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="import",
+        resource_type="trial_balance",
+        resource_id=data.period_id,
+        new={
+            "source": "connector",
+            "connector_id": data.connector_id,
+            "imported": imported,
+            "updated": updated,
+            "errors": len(errors),
+        },
+        summary=f"pulled a trial balance from connector #{data.connector_id} ({imported} new, {updated} updated)",
+        request=request,
+        commit=True,
+    )
     return ImportResult(records_imported=imported, records_updated=updated, errors=errors)
 
 
@@ -91,18 +126,58 @@ def import_from_connector(
 def update_entry(
     entry_id: int,
     data: TrialBalanceEntryUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
-    """Manually adjust a trial balance entry."""
+    """
+    Manually adjust a trial balance entry.
+
+    Closed periods are frozen: reopen the period first if the figures really must change.
+    A stale ``version`` is rejected with 409 (PLAN §8.1).
+    """
     entry = db.get(TrialBalanceEntry, entry_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trial balance entry not found")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    try:
+        locking.check_version(entry, data.version, "trial balance entry")
+    except locking.VersionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+            headers={"X-Conflict-Reason": "stale-version"},
+        )
+
+    period = db.get(Period, entry.period_id)
+    if period is not None:
+        fy = db.get(FiscalYear, period.fiscal_year_id)
+        if period.is_closed or (fy is not None and fy.status in ("closed", "locked")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Period '{period.name}' is closed; reopen it before editing its trial balance",
+            )
+
+    payload = data.model_dump(exclude_unset=True, exclude={"version"})
+    before = audit_svc.snapshot(entry, list(payload))
+    for field, value in payload.items():
         setattr(entry, field, value)
     entry.source = "manual"
+    entry.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    locking.bump(entry)
 
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="trial_balance_entry",
+        resource_id=entry.id,
+        old=before,
+        new=audit_svc.snapshot(entry, list(payload)),
+        summary=f"adjusted trial balance entry #{entry.id}",
+        request=request,
+    )
     db.commit()
     db.refresh(entry)
     return entry

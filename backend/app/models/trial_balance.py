@@ -28,3 +28,7 @@ class TrialBalanceEntry(Base):
     connector_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("external_connectors.id"), nullable=True
     )
+    # Optimistic locking (PLAN §8.1): bumped on every write, checked by the update
+    # endpoint so two users editing the same entry cannot silently overwrite each other.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

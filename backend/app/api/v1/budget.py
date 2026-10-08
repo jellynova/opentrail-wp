@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Literal, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -28,7 +28,9 @@ from app.schemas.budget import (
     BudgetYearResponse,
     BudgetYearUpdate,
 )
+from app.services import audit as audit_svc
 from app.services import budget_service as bsvc
+from app.services import locking
 
 router = APIRouter()
 
@@ -65,6 +67,25 @@ def _request_or_404(db: Session, request_id: int) -> BudgetRequest:
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+def _conflict(exc: "locking.VersionConflict") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=str(exc),
+        headers={"X-Conflict-Reason": "stale-version"},
+    )
+
+
+def _request_snapshot(req: BudgetRequest) -> dict:
+    return {
+        "department": req.department,
+        "account_id": req.account_id,
+        "proposed_amount": str(req.proposed_amount) if req.proposed_amount is not None else None,
+        "approved_amount": str(req.approved_amount) if req.approved_amount is not None else None,
+        "status": req.status,
+        "review_comment": req.review_comment,
+    }
 
 
 def _check_owner(req: BudgetRequest, user: User) -> None:
@@ -143,10 +164,12 @@ def get_budget_year(
 def update_budget_year(
     budget_year_id: int,
     data: BudgetYearUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
     by = _budget_year_or_404(db, budget_year_id)
+    old_status = by.status
     updates = data.model_dump(exclude_unset=True)
     new_status = updates.pop("status", None)
     if new_status and new_status != by.status:
@@ -160,6 +183,18 @@ def update_budget_year(
     for field, value in updates.items():
         setattr(by, field, value)
 
+    if new_status and new_status != old_status:
+        audit_svc.record(
+            db,
+            user=current_user,
+            action="status_change",
+            resource_type="budget_year",
+            resource_id=by.id,
+            old={"status": old_status},
+            new={"status": new_status},
+            summary=f"moved budget year {by.label} from {old_status} to {new_status}",
+            request=request,
+        )
     db.commit()
     db.refresh(by)
     return by
@@ -199,6 +234,7 @@ def list_budget_requests(
 def create_budget_request(
     budget_year_id: int,
     data: BudgetRequestCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer", "budget_manager")),
 ):
@@ -235,6 +271,17 @@ def create_budget_request(
         status="draft",
     )
     db.add(req)
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="budget_request",
+        resource_id=req.id,
+        new=_request_snapshot(req),
+        summary=f"drafted a {department} budget request",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -244,17 +291,38 @@ def create_budget_request(
 def update_budget_request(
     request_id: int,
     data: BudgetRequestUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer", "budget_manager")),
 ):
     req = _request_or_404(db, request_id)
     _check_owner(req, current_user)
+    try:
+        locking.check_version(req, data.version, "budget request")
+    except locking.VersionConflict as exc:
+        raise _conflict(exc)
     if req.status != "draft":
         raise _bad_request(f"Cannot update a request in status '{req.status}'")
 
-    for field, value in data.model_dump(exclude_unset=True).items():
+    before = _request_snapshot(req)
+    # ``version`` is the client's concurrency token, not a field to write.
+    for field, value in data.model_dump(exclude_unset=True, exclude={"version"}).items():
         setattr(req, field, value)
+    req.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    locking.bump(req)
 
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="budget_request",
+        resource_id=req.id,
+        old=before,
+        new=_request_snapshot(req),
+        summary=f"edited a {req.department} budget request",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -263,6 +331,7 @@ def update_budget_request(
 @router.delete("/budget-requests/{request_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_budget_request(
     request_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer", "budget_manager")),
 ):
@@ -270,6 +339,16 @@ def delete_budget_request(
     _check_owner(req, current_user)
     if req.status != "draft":
         raise _bad_request("Only draft requests can be deleted")
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="budget_request",
+        resource_id=req.id,
+        old=_request_snapshot(req),
+        summary=f"deleted a {req.department} budget request",
+        request=request,
+    )
     db.delete(req)
     db.commit()
 
@@ -277,6 +356,7 @@ def delete_budget_request(
 @router.post("/budget-requests/{request_id}/submit", response_model=BudgetRequestResponse)
 def submit_budget_request(
     request_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer", "budget_manager")),
 ):
@@ -292,6 +372,18 @@ def submit_budget_request(
 
     req.status = "submitted"
     req.submitted_at = datetime.now(timezone.utc)
+    db.flush()
+    locking.bump(req)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="submit",
+        resource_type="budget_request",
+        resource_id=req.id,
+        new={"status": "submitted", "proposed_amount": str(req.proposed_amount)},
+        summary=f"submitted a {req.department} budget request for {req.proposed_amount}",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -301,6 +393,7 @@ def submit_budget_request(
 def approve_budget_request(
     request_id: int,
     data: BudgetApprovalRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*FINANCE_ROLES)),
 ):
@@ -311,6 +404,18 @@ def approve_budget_request(
     req.status = "approved" if Decimal(str(amount)) == Decimal(str(req.proposed_amount)) else "modified"
     req.reviewed_by_user_id = current_user.id
     req.review_comment = data.review_comment
+    db.flush()
+    locking.bump(req)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="approve",
+        resource_type="budget_request",
+        resource_id=req.id,
+        new={"status": req.status, "approved_amount": str(req.approved_amount), "comment": data.review_comment},
+        summary=f"approved a {req.department} budget request at {req.approved_amount}",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -320,6 +425,7 @@ def approve_budget_request(
 def reject_budget_request(
     request_id: int,
     data: BudgetReviewComment,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*FINANCE_ROLES)),
 ):
@@ -328,6 +434,18 @@ def reject_budget_request(
     req.approved_amount = None
     req.reviewed_by_user_id = current_user.id
     req.review_comment = data.review_comment
+    db.flush()
+    locking.bump(req)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="reject",
+        resource_type="budget_request",
+        resource_id=req.id,
+        new={"status": "rejected", "comment": data.review_comment},
+        summary=f"rejected a {req.department} budget request",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -337,6 +455,7 @@ def reject_budget_request(
 def return_budget_request(
     request_id: int,
     data: BudgetReviewComment,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*FINANCE_ROLES)),
 ):
@@ -345,6 +464,18 @@ def return_budget_request(
     req.status = "draft"
     req.reviewed_by_user_id = current_user.id
     req.review_comment = data.review_comment
+    db.flush()
+    locking.bump(req)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="return",
+        resource_type="budget_request",
+        resource_id=req.id,
+        new={"status": "draft", "comment": data.review_comment},
+        summary=f"returned a {req.department} budget request for revision",
+        request=request,
+    )
     db.commit()
     db.refresh(req)
     return req
@@ -369,6 +500,7 @@ def list_budget_lines(
 def replace_budget_lines(
     budget_year_id: int,
     lines: List[BudgetLineIn],
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -382,13 +514,24 @@ def replace_budget_lines(
         acct = db.get(Account, l.account_id)
         db.add(BudgetLine(budget_year_id=by.id, account_id=l.account_id, approved_amount=l.approved_amount,
                           budget_type=l.budget_type or ("capital" if acct.capital_acct else "operating")))
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="set_lines",
+        resource_type="budget_year",
+        resource_id=by.id,
+        new={"lines": len(lines)},
+        summary=f"replaced the budget lines for {by.label} ({len(lines)} lines)",
+        request=request,
+        commit=True,
+    )
     return db.scalars(select(BudgetLine).where(BudgetLine.budget_year_id == by.id)).all()
 
 
 @router.post("/budget-years/{budget_year_id}/consolidate")
 def consolidate_budget(
     budget_year_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -398,6 +541,17 @@ def consolidate_budget(
     pending = db.scalars(select(BudgetRequest).where(
         BudgetRequest.budget_year_id == by.id, BudgetRequest.status == "submitted")).all()
     count = bsvc.consolidate_requests(db, by)
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="consolidate",
+        resource_type="budget_year",
+        resource_id=by.id,
+        new={"lines": count, "requests_pending_review": len(pending)},
+        summary=f"consolidated {count} budget lines for {by.label}",
+        request=request,
+        commit=True,
+    )
     return {"lines": count, "requests_pending_review": len(pending)}
 
 
@@ -459,6 +613,7 @@ def list_amendments(
 def create_amendment(
     budget_year_id: int,
     data: BudgetAmendmentCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*FINANCE_ROLES)),
 ):
@@ -479,6 +634,22 @@ def create_amendment(
     for l in data.lines:
         db.add(BudgetAmendmentLine(amendment_id=amendment.id, account_id=l.account_id, amount=l.amount,
                                    description=l.description))
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="budget_amendment",
+        resource_id=amendment.id,
+        new={
+            "budget_year": by.label,
+            "amendment_number": amendment.amendment_number,
+            "lines": len(data.lines),
+            "rationale": data.rationale,
+        },
+        summary=f"drafted budget amendment {amendment.amendment_number} for {by.label}",
+        request=request,
+    )
     db.commit()
     db.refresh(amendment)
     return amendment
@@ -488,6 +659,7 @@ def create_amendment(
 def approve_amendment(
     amendment_id: int,
     data: BudgetAmendmentApprove,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -503,6 +675,21 @@ def approve_amendment(
     amendment.approval_reference = reference
     amendment.approved_date = data.approved_date or date.today()
     amendment.approved_by_user_id = current_user.id
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="approve",
+        resource_type="budget_amendment",
+        resource_id=amendment.id,
+        new={
+            "amendment_number": amendment.amendment_number,
+            "approval_reference": reference,
+            "approved_date": amendment.approved_date.isoformat() if amendment.approved_date else None,
+        },
+        summary=f"approved budget amendment {amendment.amendment_number} ({reference})",
+        request=request,
+    )
     db.commit()
     db.refresh(amendment)
     return amendment
@@ -511,6 +698,7 @@ def approve_amendment(
 @router.delete("/budget-amendments/{amendment_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_amendment(
     amendment_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*FINANCE_ROLES)),
 ):
@@ -519,6 +707,16 @@ def delete_amendment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Amendment not found")
     if amendment.status != "draft":
         raise _bad_request("Approved amendments cannot be deleted; record an offsetting amendment")
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="budget_amendment",
+        resource_id=amendment.id,
+        old={"amendment_number": amendment.amendment_number},
+        summary=f"deleted draft budget amendment {amendment.amendment_number}",
+        request=request,
+    )
     db.delete(amendment)
     db.commit()
 

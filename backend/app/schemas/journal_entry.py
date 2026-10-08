@@ -46,6 +46,8 @@ class JournalEntryCreate(BaseModel):
 
 
 class JournalEntryUpdate(BaseModel):
+    # Optimistic locking (PLAN §8.1): the version the client loaded, if it is tracking one.
+    version: Optional[int] = None
     entry_date: Optional[date] = None
     reference: Optional[str] = None
     description: Optional[str] = None
@@ -63,6 +65,7 @@ class JournalEntryResponse(BaseModel):
     prepared_by_user_id: int
     reviewed_by_user_id: Optional[int]
     status: str
+    version: int = 1
     created_at: datetime
     lines: List[JournalLineResponse] = []
 

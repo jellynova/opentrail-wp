@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import List, Any, Dict
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,7 @@ from app.schemas.connector import (
     CustomQueryRequest,
     PullResult,
 )
+from app.services import audit as audit_svc
 from app.services import sql_connector as svc
 from app.services.sql_connector import encrypt_password
 
@@ -34,6 +35,7 @@ def list_connectors(
 @router.post("/connectors", response_model=ConnectorResponse, status_code=status.HTTP_201_CREATED)
 def create_connector(
     data: ConnectorCreate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
@@ -50,7 +52,18 @@ def create_connector(
         created_by_user_id=current_user.id,
     )
     db.add(connector)
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="connector",
+        resource_id=connector.id,
+        new={"name": connector.name, "system_type": connector.system_type, "host": connector.host, "database_name": connector.database_name, "is_active": connector.is_active},
+        summary=f"configured connector {connector.name} ({connector.system_type})",
+        request=request,
+        commit=True,
+    )
     db.refresh(connector)
     return connector
 
@@ -71,12 +84,14 @@ def get_connector(
 def update_connector(
     connector_id: int,
     data: ConnectorUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
     connector = db.get(ExternalConnector, connector_id)
     if connector is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+    before = audit_svc.snapshot(connector, ["name", "host", "port", "database_name", "username", "schema_name", "is_active"])
 
     if data.name is not None:
         connector.name = data.name
@@ -95,7 +110,19 @@ def update_connector(
     if data.is_active is not None:
         connector.is_active = data.is_active
 
-    db.commit()
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="update",
+        resource_type="connector",
+        resource_id=connector.id,
+        old=before,
+        new=audit_svc.snapshot(connector, ["name", "host", "port", "database_name", "username", "schema_name", "is_active"]),
+        summary=f"updated connector {connector.name}",
+        request=request,
+        commit=True,
+    )
     db.refresh(connector)
     return connector
 
@@ -103,12 +130,23 @@ def update_connector(
 @router.delete("/connectors/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_connector(
     connector_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
     connector = db.get(ExternalConnector, connector_id)
     if connector is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="connector",
+        resource_id=connector.id,
+        old={"name": connector.name, "system_type": connector.system_type, "host": connector.host, "database_name": connector.database_name, "is_active": connector.is_active},
+        summary=f"deleted connector {connector.name}",
+        request=request,
+    )
     db.delete(connector)
     db.commit()
 
@@ -116,6 +154,7 @@ def delete_connector(
 @router.post("/connectors/{connector_id}/test", response_model=ConnectorTestResult)
 def test_connector(
     connector_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
@@ -125,7 +164,17 @@ def test_connector(
 
     result = svc.test_connection(connector)
     connector.last_tested_at = datetime.now(timezone.utc)
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="test_connection",
+        resource_type="connector",
+        resource_id=connector.id,
+        new={"success": result["success"], "message": result["message"]},
+        summary=f"tested connector {connector.name}: {'ok' if result['success'] else 'failed'}",
+        request=request,
+        commit=True,
+    )
 
     return ConnectorTestResult(
         success=result["success"],
@@ -239,7 +288,17 @@ def pull_chart_of_accounts(
             errors.append(f"Account '{row.get('acct_fmtd')}': {exc}")
 
     connector.last_pull_at = datetime.now(timezone.utc)
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="pull_coa",
+        resource_type="connector",
+        resource_id=connector.id,
+        new={"fiscal_year": data.fiscal_year, "created": created, "updated": updated, "errors": len(errors)},
+        summary=f"imported the chart of accounts from {connector.name} ({created} new, {updated} updated)",
+        request=request,
+        commit=True,
+    )
 
     return PullResult(
         records_processed=len(rows),
@@ -291,6 +350,23 @@ def pull_trial_balance(
         period_id=period.id,
         fiscal_year=data.fiscal_year,
         period_number=data.period,
+    )
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="pull_trial_balance",
+        resource_type="connector",
+        resource_id=connector_id,
+        new={
+            "fiscal_year": data.fiscal_year,
+            "period": data.period,
+            "created": imported,
+            "updated": updated_count,
+            "errors": len(errors),
+        },
+        summary=f"pulled the {data.fiscal_year} period {data.period} trial balance from the ERP",
+        request=request,
+        commit=True,
     )
     return PullResult(
         records_processed=imported + updated_count,
@@ -385,7 +461,17 @@ def pull_budget(
             errors.append(f"Budget row '{row.get('acct_fmtd')}': {exc}")
 
     connector.last_pull_at = datetime.now(timezone.utc)
-    db.commit()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="pull_budget",
+        resource_type="connector",
+        resource_id=connector.id,
+        new={"fiscal_year": data.fiscal_year, "created": created, "updated": updated_count, "errors": len(errors)},
+        summary=f"imported budget lines from {connector.name}",
+        request=request,
+        commit=True,
+    )
 
     return PullResult(
         records_processed=len(rows),
