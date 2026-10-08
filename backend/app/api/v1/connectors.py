@@ -211,6 +211,8 @@ def pull_chart_of_accounts(
 
     try:
         rows = svc.pull_coa(connector, data.fiscal_year)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
@@ -343,14 +345,17 @@ def pull_trial_balance(
             detail=f"Period {data.period} not found in fiscal year {data.fiscal_year}",
         )
 
-    imported, updated_count, errors = tb_svc.import_from_connector(
-        db=db,
-        connector_id=connector_id,
-        fiscal_year_id=fy.id,
-        period_id=period.id,
-        fiscal_year=data.fiscal_year,
-        period_number=data.period,
-    )
+    try:
+        imported, updated_count, errors = tb_svc.import_from_connector(
+            db=db,
+            connector_id=connector_id,
+            fiscal_year_id=fy.id,
+            period_id=period.id,
+            fiscal_year=data.fiscal_year,
+            period_number=data.period,
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
     audit_svc.record(
         db,
         user=current_user,

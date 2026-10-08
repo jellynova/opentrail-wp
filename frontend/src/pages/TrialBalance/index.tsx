@@ -25,7 +25,7 @@ import {
 } from '@/components/ui/table'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
 import { useTrialBalance, useImportFromCSV } from '@/hooks/useTrialBalance'
-import { formatCurrency, netBalance } from '@/lib/utils'
+import { apiErrorMessage, formatCurrency, netBalance } from '@/lib/utils'
 import type { TrialBalanceEntry } from '@/types'
 import { toast } from '@/hooks/useToast'
 
@@ -181,15 +181,27 @@ export function TrialBalancePage() {
 
   const handleCSVImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !selectedPeriodId) return
+    if (!file || !selectedPeriodId || !selectedFYId) {
+      toast({
+        title: 'Select a fiscal year and period first',
+        description: 'The import needs to know which year the accounts belong to.',
+        variant: 'destructive',
+      })
+      return
+    }
     importCSV.mutate(
-      { period_id: selectedPeriodId, file },
+      { period_id: selectedPeriodId, fiscal_year_id: selectedFYId, file },
       {
         onSuccess: (data) => {
-          toast({ title: 'Import successful', description: `Imported ${data.imported} records.` })
+          toast({
+            title: 'Import complete',
+            description: `${data.records_imported} new, ${data.records_updated} updated${
+              data.errors.length ? `, ${data.errors.length} row error(s)` : ''
+            }.`,
+          })
         },
-        onError: () => {
-          toast({ title: 'Import failed', description: 'Could not import CSV.', variant: 'destructive' })
+        onError: (err) => {
+          toast({ title: 'Import failed', description: apiErrorMessage(err), variant: 'destructive' })
         },
       }
     )

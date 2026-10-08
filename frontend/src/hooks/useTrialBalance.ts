@@ -15,39 +15,29 @@ export function useTrialBalance(periodId: number | null) {
   })
 }
 
-interface ImportFromConnectorPayload {
-  connector_id: number
-  period_id: number
-  fiscal_year_id: number
-}
-
-export function useImportFromConnector() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: ImportFromConnectorPayload) =>
-      api
-        .post<{ imported: number }>('/v1/trial-balance/import/connector', payload)
-        .then((r) => r.data),
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({ queryKey: ['trial-balance', variables.period_id] })
-    },
-  })
+/** What both import endpoints return (backend `ImportResult`). */
+export interface ImportResult {
+  records_imported: number
+  records_updated: number
+  errors: string[]
 }
 
 interface ImportFromCSVPayload {
   period_id: number
+  fiscal_year_id: number
   file: File
 }
 
 export function useImportFromCSV() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ period_id, file }: ImportFromCSVPayload) => {
+    mutationFn: ({ period_id, fiscal_year_id, file }: ImportFromCSVPayload) => {
       const formData = new FormData()
       formData.append('file', file)
-      formData.append('period_id', period_id.toString())
+      // period_id and fiscal_year_id are query parameters, not form fields.
       return api
-        .post<{ imported: number }>('/v1/trial-balance/import/csv', formData, {
+        .post<ImportResult>('/v1/trial-balance/import/csv', formData, {
+          params: { period_id, fiscal_year_id },
           headers: { 'Content-Type': 'multipart/form-data' },
         })
         .then((r) => r.data)

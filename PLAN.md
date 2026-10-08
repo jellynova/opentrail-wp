@@ -964,3 +964,50 @@ This is not optional — it's required for accountability in public sector finan
 **Why WeasyPrint over ReportLab?** WeasyPrint lets you design statements in CSS/HTML, which is far more maintainable than ReportLab's programmatic PDF layout. Municipal financial statements have complex multi-column layouts that CSS handles well.
 
 **Why SSE over WebSockets for real-time?** For 4–10 users in a local network, SSE is sufficient and dramatically simpler to implement. WebSockets add complexity (connection management, reconnection logic) that isn't justified at this scale.
+
+---
+
+## Implementation Status
+
+_Updated after Phases 7 and 8. Sections above are the specification; this records where the
+code stands against it and the deviations worth knowing about._
+
+### Complete
+
+| Plan section | Notes |
+|---|---|
+| Phase 1 — foundation, auth, periods | Docker Compose stack, JWT auth, four roles, fiscal years and periods |
+| Phase 2 — trial balance & COA | Segment definitions, mapping schemes, classifications, CSV and connector import |
+| Phase 3 — SQL connectors | AMAIS queries as specified, custom query support, Fernet-encrypted credentials |
+| Phase 4 — journal entries | Four entry types, post/approve/unpost, configurable balance enforcement, auto schedules |
+| Phase 5 — report builder | Tree definition, formula rows, comparative columns, built-in PSAB and LGDE templates, PDF/Excel |
+| Phase 6 — budgeting | Requests, review, consolidation, amendments, variance, council report |
+| Phase 7 — documents | Binder folders, versioning, review notes, two-level sign-off, period close, roll forward |
+| Phase 8 — collaboration | Optimistic locking, SSE notifications, audit trail with activity views |
+
+### Deviations
+
+- **Period-close snapshot** is stored in `period_closes` / `period_close_balances` rather
+  than written back into `TrialBalanceEntry` (§7.3). The trial balance holds unadjusted
+  ERP figures and the balance engine adds posted adjustments on top, so writing adjusted
+  closing balances back would double-count every AJE and RJE.
+- **Working-paper sign-off** is first-class state on the version row (preparer and
+  reviewer user + timestamp, plus a re-approval flag) rather than annotations, so a
+  document's status can be queried and enforced.
+- **Sign-off segregation of duties**: the reviewer must be a `finance_admin` and cannot be
+  the preparer. A finance_admin who prepares a paper needs an officer to sign it off
+  first — the same rule the budget module applies to request reviews.
+- **SSE authentication** accepts the access token as a `token` query parameter, because
+  `EventSource` cannot set an `Authorization` header. Acceptable for a locally hosted
+  deployment; see the deployment guide in `README.md`.
+
+### Not yet built (Phase 4 of the build order)
+
+- **VADIM connector pulls** (§3.3). The connection layer is generic and VADIM connectors
+  can be configured and tested, but `pull_coa` / `pull_trial_balance` / `pull_budget` are
+  AMAIS-only and return `501 Not Implemented`. The VADIM query templates are not in this
+  plan — they need the same SYSCOLUMNS-style schema confirmation the AMAIS queries got.
+- **Tangible Capital Asset schedule** (§5.2, PS 3150). `fa-hdr` is empty at the surveyed
+  AMAIS installation, so the source is still an open question (CSV asset register vs. the
+  fleet/work-management module vs. deriving from `capital-acct`).
+- **Multi-year comparative reports** beyond the budget module's multi-year view.
