@@ -14,11 +14,21 @@ export async function downloadFile(
     responseType: 'blob',
   })
   const disposition = String(response.headers['content-disposition'] ?? '')
-  const match = /filename="?([^";]+)"?/.exec(disposition)
+  // Prefer RFC 6266 filename* (UTF-8, for non-ASCII names) over the ASCII fallback
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  const plain = /filename="?([^";]+)"?/.exec(disposition)
+  let name = plain?.[1]
+  if (extended) {
+    try {
+      name = decodeURIComponent(extended[1])
+    } catch {
+      // malformed encoding: keep the fallback
+    }
+  }
   const href = URL.createObjectURL(response.data)
   const link = document.createElement('a')
   link.href = href
-  link.download = match?.[1] ?? fallbackName
+  link.download = name ?? fallbackName
   document.body.appendChild(link)
   link.click()
   link.remove()

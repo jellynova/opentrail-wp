@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from app.services import document_manager as doc_mgr
 
 
@@ -266,3 +268,17 @@ def test_download_and_delete_removes_all_versions(client, auth, fy2025, document
 
     assert client.get("/api/v1/documents", headers=auth("viewer")).json() == []
     assert not list(documents_dir.rglob("*.pdf")), "files should be removed from disk"
+
+
+@pytest.mark.parametrize("name", ["Rapport “final” — 2025.pdf", 'quote"d.pdf', "Bank rec\r\nX-Injected: 1.pdf"])
+def test_download_header_safe_for_any_display_name(client, auth, fy2025, documents_dir, name):
+    r = client.post(
+        "/api/v1/documents/upload", headers=auth("officer"),
+        data={"fiscal_year_id": str(fy2025.id), "folder_path": "/current/2025", "display_name": name},
+        files={"file": ("x.pdf", b"%PDF", "application/pdf")},
+    )
+    assert r.status_code == 201, r.text
+    dl = client.get(f"/api/v1/documents/{r.json()['id']}/download", headers=auth("viewer"))
+    assert dl.status_code == 200 and dl.content == b"%PDF"
+    assert "x-injected" not in dl.headers
+    assert dl.headers["content-disposition"].startswith('attachment; filename="')

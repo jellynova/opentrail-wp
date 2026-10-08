@@ -9,6 +9,7 @@ import mimetypes
 import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import select
@@ -439,6 +440,16 @@ def update_document(
     return _detail(db, latest)
 
 
+def _content_disposition(name: str) -> str:
+    """
+    RFC 6266 attachment header. Display names are user-supplied and often non-ASCII
+    (curly quotes, accents, em dashes), which Starlette cannot latin-1 encode raw, and a
+    quote or CR/LF would corrupt the header; send an ASCII fallback plus filename*.
+    """
+    fallback = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name) or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
 @router.get("/documents/{document_id}/download")
 def download_document(
     document_id: int,
@@ -460,7 +471,7 @@ def download_document(
     return Response(
         content=content,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{wp.display_name}"'},
+        headers={"Content-Disposition": _content_disposition(wp.display_name)},
     )
 
 
