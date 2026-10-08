@@ -48,7 +48,7 @@ def recent_events(
     current_user: User = Depends(get_current_active_user),
 ) -> List[Dict[str, Any]]:
     """The most recent notifications (newest first), used to populate the bell on load."""
-    return list(reversed(events_svc.history()))[:limit]
+    return list(reversed(events_svc.history(current_user.role)))[:limit]
 
 
 @router.get("/events/stream")
@@ -66,14 +66,18 @@ async def stream_events(
     if not raw_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token required")
     user = _user_from_token(raw_token, db)
+    username, role = user.username, user.role
+    # Release the pooled connection now: the stream can stay open for hours, and an
+    # un-closed session would sit "idle in transaction" holding it the whole time.
+    db.close()
 
     queue = events_svc.subscribe()
 
     async def event_stream():
         try:
             # Replay recent activity so a fresh page shows context immediately.
-            recent = events_svc.history()
-            yield f"event: ready\ndata: {json.dumps({'user': user.username, 'recent': recent}, default=str)}\n\n"
+            recent = events_svc.history(role)
+            yield f"event: ready\ndata: {json.dumps({'user': username, 'recent': recent}, default=str)}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
@@ -82,7 +86,8 @@ async def stream_events(
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
-                yield events_svc.format_sse(notification)
+                if events_svc.visible_to(notification, role):
+                    yield events_svc.format_sse(notification)
         except asyncio.CancelledError:  # client went away mid-write
             raise
         finally:

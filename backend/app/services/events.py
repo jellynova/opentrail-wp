@@ -9,14 +9,23 @@ Sync request handlers run in a threadpool, so ``publish`` marshals onto the even
 captured at application startup (``set_loop``) with ``call_soon_threadsafe``. The last
 ``HISTORY_SIZE`` notifications are kept in a ring buffer so a client that connects (or
 reconnects) immediately sees recent activity without waiting for the next event.
+
+Notifications raised inside a transaction are held on the SQLAlchemy session and
+published only when it commits (``publish_on_commit``), so a request that fails after
+recording its audit entry never announces a change that was rolled back. Budget managers
+only receive budget workflow events (``visible_to``).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +36,8 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 _subscribers: "set[asyncio.Queue]" = set()
 _history: Deque[Dict[str, Any]] = deque(maxlen=HISTORY_SIZE)
 _next_id = 1
+_id_lock = threading.Lock()  # publishers run on threadpool threads
+_PENDING_KEY = "pending_notifications"
 
 
 def set_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
@@ -49,9 +60,16 @@ def subscriber_count() -> int:
     return len(_subscribers)
 
 
-def history() -> List[Dict[str, Any]]:
-    """Recent notifications, oldest first."""
-    return list(_history)
+def visible_to(notification: Dict[str, Any], role: Optional[str]) -> bool:
+    """Budget managers submit and track budget requests only (PLAN §1.2)."""
+    if role == "budget_manager":
+        return str(notification.get("resource_type") or "").startswith("budget")
+    return True
+
+
+def history(role: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Recent notifications visible to ``role`` (all when None), oldest first."""
+    return [n for n in _history if visible_to(n, role)]
 
 
 def make_notification(
@@ -64,8 +82,11 @@ def make_notification(
     username: Optional[str] = None,
 ) -> Dict[str, Any]:
     global _next_id
+    with _id_lock:
+        notification_id = _next_id
+        _next_id += 1
     notification = {
-        "id": _next_id,
+        "id": notification_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": action,
         "resource_type": resource_type,
@@ -74,7 +95,6 @@ def make_notification(
         "user_id": user_id,
         "username": username,
     }
-    _next_id += 1
     return notification
 
 
@@ -105,12 +125,35 @@ def publish(notification: Dict[str, Any]) -> None:
         logger.debug("Event loop unavailable; notification %s not delivered", notification.get("id"))
 
 
-def publish_from_audit(entry: Any, user: Any, summary: Optional[str] = None) -> None:
-    """Publish a notification derived from an AuditLog row."""
+def publish_on_commit(db: Optional[Session], notification: Dict[str, Any]) -> None:
+    """Publish now if ``db`` has nothing uncommitted, otherwise when it commits."""
+    if db is None or not db.in_transaction():
+        publish(notification)
+    else:
+        db.info.setdefault(_PENDING_KEY, []).append(notification)
+
+
+@event.listens_for(Session, "after_commit")
+def _publish_pending(session: Session) -> None:
+    for notification in session.info.pop(_PENDING_KEY, []):
+        publish(notification)
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _discard_pending(session: Session, previous_transaction) -> None:
+    if not previous_transaction.nested:
+        session.info.pop(_PENDING_KEY, None)
+
+
+def publish_from_audit(
+    entry: Any, user: Any, summary: Optional[str] = None, db: Optional[Session] = None
+) -> None:
+    """Publish a notification derived from an AuditLog row (after ``db`` commits)."""
     from app.services.audit import describe
 
     username = getattr(user, "username", None)
-    publish(
+    publish_on_commit(
+        db,
         make_notification(
             action=entry.action,
             resource_type=entry.resource_type,

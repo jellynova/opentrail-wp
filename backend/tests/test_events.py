@@ -119,3 +119,42 @@ def test_stream_sends_ready_frame_with_recent_activity(client, auth, users, db, 
         assert payload["recent"][0]["message"] == "closed March"
     finally:
         session.close()
+
+
+def test_notifications_wait_for_commit_and_drop_on_rollback(db, users):
+    from app.services import audit as audit_svc
+
+    audit_svc.record(db, user=users["officer"], action="post", resource_type="journal_entry",
+                     resource_id=1, summary="officer posted AJE-001")
+    assert events_svc.history() == []  # flushed, not yet committed
+    db.rollback()
+    assert events_svc.history() == []
+
+    audit_svc.record(db, user=users["officer"], action="post", resource_type="journal_entry",
+                     resource_id=2, summary="officer posted AJE-002")
+    db.commit()
+    assert [n["message"] for n in events_svc.history()] == ["officer posted AJE-002"]
+
+
+def test_budget_managers_only_see_budget_events(client, auth):
+    for rtype in ("journal_entry", "budget_request", "document"):
+        events_svc.publish(events_svc.make_notification(action="update", resource_type=rtype, message=rtype))
+    assert [n["message"] for n in client.get("/api/v1/events/recent", headers=auth("parks_mgr")).json()] == [
+        "budget_request"
+    ]
+    assert len(client.get("/api/v1/events/recent", headers=auth("viewer")).json()) == 3
+
+
+def test_stream_releases_its_db_session(users, engine):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api.v1.events import stream_events
+
+    session = sessionmaker(bind=engine)()
+    token = create_access_token({"sub": str(users["parks_mgr"].id)})
+    events_svc.publish(events_svc.make_notification(action="post", resource_type="journal_entry", message="je"))
+    response = asyncio.run(stream_events(request=_StubRequest(), token=token, db=session))
+    assert not session.in_transaction()  # connection returned to the pool before streaming
+
+    frame = asyncio.run(anext(response.body_iterator))
+    assert json.loads(frame.split("data: ", 1)[1])["recent"] == []  # filtered for budget managers

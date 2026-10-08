@@ -124,7 +124,7 @@ def record(
         try:
             from app.services.events import publish_from_audit
 
-            publish_from_audit(entry, user, summary)
+            publish_from_audit(entry, user, summary, db=db)
         except Exception:  # pragma: no cover
             logger.exception("Failed to publish notification for audit entry %s", entry.id)
 
