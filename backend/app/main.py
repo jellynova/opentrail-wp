@@ -3,8 +3,10 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import settings
 from app.core.database import Base, engine, SessionLocal
@@ -90,6 +92,16 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+
+@app.exception_handler(StaleDataError)
+async def _stale_write(request: Request, exc: StaleDataError):
+    """A version-locked row changed between load and save (PLAN §8.1): the later write loses."""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "This record was changed by someone else while you were saving. Reload and try again."},
+        headers={"X-Conflict-Reason": "stale-version"},
+    )
+
 
 app.add_middleware(
     CORSMiddleware,

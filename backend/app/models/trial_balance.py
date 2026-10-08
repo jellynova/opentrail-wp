@@ -31,4 +31,8 @@ class TrialBalanceEntry(Base):
     # Optimistic locking (PLAN §8.1): bumped on every write, checked by the update
     # endpoint so two users editing the same entry cannot silently overwrite each other.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # The database enforces the version too: every UPDATE carries "WHERE version = <loaded>",
+    # so two writers that both passed locking.check_version can't both win (StaleDataError
+    # -> 409). Versions are still bumped explicitly by locking.bump().
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

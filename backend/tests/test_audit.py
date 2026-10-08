@@ -184,3 +184,48 @@ def test_optimistic_locking_on_budget_request(client, auth, fy2025, users, db):
     assert client.get(f"/api/v1/budget-years/{by['id']}/requests", headers=auth("admin")).json()[0][
         "proposed_amount"
     ] == "1200.00"
+
+
+def test_concurrent_writers_cannot_both_win(engine, fy2025, db):
+    """Both writers load version 1 and pass the application check; the database-level
+    version condition makes the second UPDATE fail instead of silently overwriting."""
+    import pytest
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm.exc import StaleDataError
+
+    from app.models.trial_balance import TrialBalanceEntry
+    from app.services import locking
+
+    add_tb(db, period_of(fy2025, 1), make_account(db, fy2025, "1000", "Cash"), ytd=100)
+    entry_id = db.query(TrialBalanceEntry).one().id
+
+    S = sessionmaker(bind=engine)
+    a, b = S(), S()
+    ea, eb = a.get(TrialBalanceEntry, entry_id), b.get(TrialBalanceEntry, entry_id)
+    for session, entry, amount in ((a, ea, 150), (b, eb, 175)):
+        locking.check_version(entry, 1, "trial balance entry")
+        entry.ytd_debit = amount
+        locking.bump(entry)
+    a.commit()
+    with pytest.raises(StaleDataError):
+        b.commit()
+    a.close(), b.close()
+    db.expire_all()
+    assert float(db.get(TrialBalanceEntry, entry_id).ytd_debit) == 150
+
+
+def test_stale_write_maps_to_409(client):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm.exc import StaleDataError
+
+    from app.main import app
+
+    @app.get("/__test_stale")
+    def _boom():
+        raise StaleDataError("simulated")
+
+    try:
+        r = TestClient(app).get("/__test_stale")
+        assert r.status_code == 409 and r.headers["x-conflict-reason"] == "stale-version"
+    finally:
+        app.router.routes = [rt for rt in app.router.routes if getattr(rt, "path", "") != "/__test_stale"]

@@ -21,6 +21,10 @@ class JournalEntry(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")  # draft / posted / approved
     # Optimistic locking (PLAN §8.1) — see TrialBalanceEntry.version.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # The database enforces the version too: every UPDATE carries "WHERE version = <loaded>",
+    # so two writers that both passed locking.check_version can't both win (StaleDataError
+    # -> 409). Versions are still bumped explicitly by locking.bump().
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -41,6 +41,10 @@ class BudgetRequest(Base):
     approved_amount: Mapped[Optional[float]] = mapped_column(Numeric(15, 2), nullable=True)
     # Optimistic locking (PLAN §8.1) — see TrialBalanceEntry.version.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # The database enforces the version too: every UPDATE carries "WHERE version = <loaded>",
+    # so two writers that both passed locking.check_version can't both win (StaleDataError
+    # -> 409). Versions are still bumped explicitly by locking.bump().
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
