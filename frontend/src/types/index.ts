@@ -359,6 +359,9 @@ export interface RollForwardResult {
   opening_debits: string
   opening_credits: string
   balanced: boolean
+  net_surplus: string
+  surplus_account: string | null
+  warnings: string[]
 }
 
 export interface Report {

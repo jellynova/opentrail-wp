@@ -138,15 +138,23 @@ def test_close_fiscal_year_closes_every_period(client, auth, fy2025, users, db, 
 
 def test_roll_forward_copies_coa_and_opens_with_prior_closing(client, auth, fy2025, users, db, documents_dir):
     cash = make_account(db, fy2025, "1000", "Cash", dept_code="FIN")
+    surplus = make_account(db, fy2025, "3900", "Accumulated surplus")
     revenue = make_account(db, fy2025, "4000", "Revenue")
+    expense = make_account(db, fy2025, "6000", "Wages")
     scheme = make_scheme(db, "PSAB")
     classify(db, scheme, cash, "financial_assets")
+    classify(db, scheme, surplus, "accumulated_surplus")
     classify(db, scheme, revenue, "revenue")
+    classify(db, scheme, expense, "expense")
 
     period = period_of(fy2025, 12)
     add_tb(db, period, cash, opening=1000, ytd=500)
-    add_tb(db, period, revenue, opening=-1000, ytd=-500)
+    add_tb(db, period, surplus, opening=-1000)
+    add_tb(db, period, revenue, ytd=-800)
+    add_tb(db, period, expense, ytd=300)
     add_je(db, period, users["officer"], "adjusting", [(cash, 250), (revenue, -250)])
+    # Reclassifications are presentation-only and must not reach next year's GL
+    add_je(db, period, users["officer"], "reclassifying", [(cash, 40), (surplus, -40)])
     _signed_document(client, auth, fy2025)
     assert client.post(f"/api/v1/fiscal-years/{fy2025.id}/close", headers=auth("admin")).status_code == 200
 
@@ -155,10 +163,12 @@ def test_roll_forward_copies_coa_and_opens_with_prior_closing(client, auth, fy20
     summary = r.json()
     assert summary["fiscal_year"]["label"] == "2026"
     assert summary["periods_created"] == 12
-    assert summary["accounts_copied"] == 2
-    assert summary["classifications_copied"] == 2
-    assert summary["opening_balances_posted"] == 2
+    assert summary["accounts_copied"] == 4
+    assert summary["classifications_copied"] == 4
+    assert summary["opening_balances_posted"] == 2  # cash and surplus; revenue/expense open at zero
     assert summary["balanced"] is True
+    assert float(summary["net_surplus"]) == 750.0  # 800 + 250 revenue - 300 expense
+    assert summary["surplus_account"] == "3900" and summary["warnings"] == []
 
     new_fy_id = summary["fiscal_year"]["id"]
     periods = client.get(f"/api/v1/fiscal-years/{new_fy_id}/periods", headers=auth("viewer")).json()
@@ -167,15 +177,19 @@ def test_roll_forward_copies_coa_and_opens_with_prior_closing(client, auth, fy20
 
     accounts = client.get("/api/v1/accounts", params={"fiscal_year_id": new_fy_id}, headers=auth("viewer")).json()
     by_code = {a["acct_fmtd"]: a for a in accounts}
-    assert set(by_code) == {"1000", "4000"}
+    assert set(by_code) == {"1000", "3900", "4000", "6000"}
     assert by_code["1000"]["dept_code"] == "FIN"
 
     entries = client.get("/api/v1/trial-balance", params={"period_id": first["id"]}, headers=auth("officer")).json()
-    # Cash closing 1000 + 500 + 250 = 1750 as an opening debit; revenue is the credit side.
-    cash_entry = next(e for e in entries if e["account_id"] == by_code["1000"]["id"])
+    # Cash closing 1000 + 500 + 250 AJE = 1750 (the RJE does not carry) as an opening debit;
+    # accumulated surplus 1000 + 750 net surplus = 1750 is the credit side.
+    by_account = {e["account_id"]: e for e in entries}
+    cash_entry = by_account[by_code["1000"]["id"]]
     assert float(cash_entry["opening_debit"]) == 1750.0
     assert float(cash_entry["opening_credit"]) == 0.0
     assert cash_entry["source"] == "roll_forward"
+    assert float(by_account[by_code["3900"]["id"]]["opening_credit"]) == 1750.0
+    assert by_code["4000"]["id"] not in by_account and by_code["6000"]["id"] not in by_account
 
     # Rolling forward again would collide with the new year.
     again = client.post(f"/api/v1/fiscal-years/{fy2025.id}/roll-forward", headers=auth("admin"))
@@ -199,3 +213,20 @@ def test_close_check_endpoint_reports_blockers(client, auth, fy2025, users, db, 
     assert body["ready"] is False
     assert len(body["unposted_journal_entries"]) == 1
     assert [d["state"] for d in body["unsigned_documents"]] == ["draft"]
+
+
+def test_roll_forward_warns_without_surplus_account(client, auth, fy2025, users, db, documents_dir):
+    cash = make_account(db, fy2025, "1000", "Cash")
+    revenue = make_account(db, fy2025, "4000", "Revenue")
+    scheme = make_scheme(db, "PSAB")
+    classify(db, scheme, revenue, "revenue")
+    period = period_of(fy2025, 12)
+    add_tb(db, period, cash, ytd=500)
+    add_tb(db, period, revenue, ytd=-500)
+    _signed_document(client, auth, fy2025)
+    assert client.post(f"/api/v1/fiscal-years/{fy2025.id}/close", headers=auth("admin")).status_code == 200
+
+    summary = client.post(f"/api/v1/fiscal-years/{fy2025.id}/roll-forward", headers=auth("admin")).json()
+    assert summary["surplus_account"] is None and summary["balanced"] is False
+    assert any("accumulated surplus" in w for w in summary["warnings"])
+    assert any("no PSAB classification" in w for w in summary["warnings"])

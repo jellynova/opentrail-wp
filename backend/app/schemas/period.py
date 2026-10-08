@@ -146,3 +146,6 @@ class RollForwardResponse(BaseModel):
     opening_debits: Decimal
     opening_credits: Decimal
     balanced: bool
+    net_surplus: Decimal = Decimal("0")  # closed to accumulated surplus (credit-positive)
+    surplus_account: Optional[str] = None
+    warnings: List[str] = []

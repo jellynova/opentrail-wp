@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import api from '@/lib/api'
-import { formatDate, formatDateTime } from '@/lib/utils'
+import { formatCurrency, formatDate, formatDateTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
 import { useAuthStore } from '@/store/auth'
 import { apiErrorMessage, humanise } from '@/lib/utils'
@@ -733,7 +733,16 @@ function FiscalYearsTab() {
                     onSuccess: (result) => {
                       toast({
                         title: `Fiscal year ${result.fiscal_year.label} created`,
-                        description: `${result.accounts_copied} accounts, ${result.opening_balances_posted} opening balances (${result.balanced ? 'balanced' : 'out of balance'})`,
+                        description: [
+                          `${result.accounts_copied} accounts, ${result.opening_balances_posted} opening balances (${result.balanced ? 'balanced' : 'out of balance'})`,
+                          result.surplus_account
+                            ? `Net surplus ${formatCurrency(Number(result.net_surplus))} closed to ${result.surplus_account}`
+                            : null,
+                          ...result.warnings,
+                        ]
+                          .filter(Boolean)
+                          .join('. '),
+                        variant: result.warnings.length ? 'destructive' : undefined,
                       })
                       setRollForwardFor(null)
                       setSelectedFYId(result.fiscal_year.id)

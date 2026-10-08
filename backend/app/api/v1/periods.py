@@ -401,4 +401,7 @@ def roll_forward_fiscal_year(
         opening_debits=summary["opening_debits"],
         opening_credits=summary["opening_credits"],
         balanced=summary["balanced"],
+        net_surplus=summary["net_surplus"],
+        surplus_account=summary["surplus_account"],
+        warnings=summary["warnings"],
     )

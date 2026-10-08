@@ -15,8 +15,11 @@ Close flow
 Roll forward
 ------------
 Creates the next fiscal year with its 12 periods, copies the chart of accounts, the
-ERP account mappings and the mapping-scheme classifications, and posts each account's
-prior-year closing balance as the new year's opening balance (PLAN §1.3).
+ERP account mappings and the mapping-scheme classifications, and posts prior-year
+closing balances as the new year's opening balances (PLAN §1.3). Opening balances are GL
+balances: adjusting entries carry forward, reclassifications (presentation only, PLAN
+§4.1) do not. Revenue and expense accounts open at zero; the year's net surplus or
+deficit is closed to the account classified ``accumulated_surplus`` in the PSAB scheme.
 """
 from __future__ import annotations
 
@@ -36,12 +39,16 @@ from app.models.period import FiscalYear, Period, PeriodClose, PeriodCloseBalanc
 from app.models.trial_balance import TrialBalanceEntry
 from app.models.user import User
 from app.services import audit as audit_svc
-from app.services.balances import ZERO, account_balances, last_period_number
+from app.services.balances import (
+    ZERO, account_balances, classifications, last_period_number, resolve_scheme_id,
+)
 from app.services.document_manager import latest_versions, sign_off_status
 
 logger = logging.getLogger(__name__)
 
 POSTED_STATUSES = ("posted", "approved")
+GL_ENTRY_TYPES = ("adjusting",)
+OPERATIONS_CLASSES = {"revenue", "expense"}
 
 
 class CloseBlocked(Exception):
@@ -364,8 +371,9 @@ def _next_label(fy: FiscalYear) -> str:
 
 def prior_year_closing(db: Session, fy: FiscalYear) -> Dict[int, Decimal]:
     """
-    Closing balance per account for a fiscal year, from the last period's close snapshot
-    if one exists, otherwise computed from the balances engine.
+    GL closing balance per account (opening + YTD + AJEs, excluding presentation-only
+    RJEs) for a fiscal year, from the last period's close snapshot if one exists,
+    otherwise computed from the balances engine.
     """
     last_number = last_period_number(db, fy.id)
     final_period = db.scalars(
@@ -377,9 +385,63 @@ def prior_year_closing(db: Session, fy: FiscalYear) -> Dict[int, Decimal]:
     if final_period is not None:
         close = period_close_detail(db, final_period.id)
         if close is not None and close.balances:
-            return {b.account_id: Decimal(str(b.closing)) for b in close.balances}
+            return {
+                b.account_id: sum(
+                    (Decimal(str(v)) for v in (b.opening, b.ytd_debit, b.aje_debit)), ZERO
+                ) - sum((Decimal(str(v)) for v in (b.ytd_credit, b.aje_credit)), ZERO)
+                for b in close.balances
+            }
 
-    return {account_id: b.closing() for account_id, b in account_balances(db, fy.id, last_number).items()}
+    return {
+        account_id: b.closing(GL_ENTRY_TYPES)
+        for account_id, b in account_balances(db, fy.id, last_number).items()
+    }
+
+
+def close_operations(
+    db: Session, closing: Dict[int, Decimal]
+) -> tuple[Dict[int, Decimal], Decimal, Optional[int], List[str]]:
+    """
+    Year-end closing entry: zero revenue and expense accounts and move their net into
+    accumulated surplus. Returns (opening balances by old account id, net surplus as a
+    debit-positive amount, the surplus account id used, warnings).
+    """
+    classes = classifications(db, resolve_scheme_id(db, "PSAB"), closing.keys())
+
+    def top(account_id: int) -> str:
+        return (classes.get(account_id) or "").split(".")[0].lower()
+
+    opening: Dict[int, Decimal] = {}
+    net = ZERO
+    warnings: List[str] = []
+    unclassified = 0
+    for account_id, amount in closing.items():
+        if top(account_id) in OPERATIONS_CLASSES:
+            net += amount
+            continue
+        if not top(account_id) and amount != ZERO:
+            unclassified += 1
+        opening[account_id] = amount
+
+    surplus_ids = [a for a, c in classes.items() if c.split(".")[0].lower() == "accumulated_surplus"]
+    surplus_id = None
+    if net != ZERO:
+        if len(surplus_ids) == 1:
+            surplus_id = surplus_ids[0]
+            opening[surplus_id] = opening.get(surplus_id, ZERO) + net
+        else:
+            warnings.append(
+                "The year's surplus/deficit was not closed to accumulated surplus: "
+                + ("no account is" if not surplus_ids else f"{len(surplus_ids)} accounts are")
+                + " classified 'accumulated_surplus' in the PSAB scheme (exactly one is required),"
+                " so opening balances do not balance."
+            )
+    if unclassified:
+        warnings.append(
+            f"{unclassified} account(s) with balances have no PSAB classification and were carried "
+            "forward as balance-sheet accounts."
+        )
+    return opening, net, surplus_id, warnings
 
 
 def roll_forward(
@@ -520,7 +582,7 @@ def roll_forward(
 
     # Opening balances = prior-year closing balances
     opening_period = created_periods.get(min(created_periods) if created_periods else 1)
-    closing = prior_year_closing(db, source)
+    closing, net_surplus, surplus_id, warnings = close_operations(db, prior_year_closing(db, source))
     opening_entries = 0
     total_debit = ZERO
     total_credit = ZERO
@@ -563,6 +625,9 @@ def roll_forward(
         "opening_debits": str(total_debit),
         "opening_credits": str(total_credit),
         "balanced": total_debit == total_credit,
+        "net_surplus": str(-net_surplus),  # credit-positive: a surplus is > 0
+        "surplus_account": account_map[surplus_id].acct_fmtd if surplus_id in account_map else None,
+        "warnings": warnings,
     }
 
     audit_svc.record(
