@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CheckCircle2,
   ChevronRight,
@@ -28,6 +28,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import api from '@/lib/api'
 import { downloadFile } from '@/lib/download'
 import { apiErrorMessage, formatDateTime, formatFileSize, formatRelativeTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
@@ -128,6 +129,38 @@ function FolderNodeView({
   )
 }
 
+/** Inline PDF viewer. An <iframe src> can't send the Bearer token, so fetch the file
+ * through the API client and show it from a blob URL. */
+function PdfPreview({ paper }: { paper: WorkingPaper }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let objectUrl: string | null = null
+    let cancelled = false
+    setUrl(null)
+    setError(null)
+    api
+      .get<Blob>(`/v1/documents/${paper.id}/download`, { responseType: 'blob' })
+      .then((r) => {
+        if (cancelled) return
+        objectUrl = URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }))
+        setUrl(objectUrl)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(apiErrorMessage(err))
+      })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [paper.id])
+
+  if (error) return <p className="py-8 text-center text-sm text-destructive">Could not load preview: {error}</p>
+  if (!url) return <LoadingSpinner />
+  return <iframe src={url} className="w-full h-[70vh] rounded border" title={paper.display_name} />
+}
+
 function PreviewDialog({ paper, onClose }: { paper: WorkingPaper | null; onClose: () => void }) {
   if (!paper) return null
   return (
@@ -137,11 +170,7 @@ function PreviewDialog({ paper, onClose }: { paper: WorkingPaper | null; onClose
           <DialogTitle>{paper.display_name}</DialogTitle>
         </DialogHeader>
         {paper.file_type === 'pdf' ? (
-          <iframe
-            src={`/api/v1/documents/${paper.id}/download`}
-            className="w-full h-[70vh] rounded border"
-            title={paper.display_name}
-          />
+          <PdfPreview paper={paper} />
         ) : (
           <div className="flex flex-col items-center gap-4 py-8 text-muted-foreground">
             <FileTypeIcon type={paper.file_type} />
