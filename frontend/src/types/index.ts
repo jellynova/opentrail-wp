@@ -69,6 +69,9 @@ export interface TrialBalanceEntry {
   ytd_credit: string
   source: string
   imported_at: string
+  /** Optimistic-locking token: echo it back on update or the save is rejected with 409. */
+  version: number
+  updated_at?: string | null
 }
 
 export interface JournalEntry {
@@ -81,6 +84,7 @@ export interface JournalEntry {
   prepared_by_user_id: number
   reviewed_by_user_id: number | null
   status: 'draft' | 'posted' | 'approved'
+  version?: number
   created_at: string
   lines?: JournalLine[]
   total_debit?: string
@@ -139,6 +143,8 @@ export interface BudgetRequest {
   review_comment: string | null
   status: 'draft' | 'submitted' | 'approved' | 'modified' | 'rejected'
   approved_amount: string | null
+  /** Optimistic-locking token: echo it back when editing, or the save is rejected with 409. */
+  version: number
 }
 
 export type TrafficLight = 'green' | 'amber' | 'red'
@@ -201,8 +207,11 @@ export interface BudgetAmendment {
   lines: { id: number; account_id: number; amount: string; description: string | null }[]
 }
 
+export type SignOffState = 'draft' | 'prepared' | 'approved' | 'reapproval_required'
+
 export interface WorkingPaper {
   id: number
+  root_id: number
   fiscal_year_id: number
   folder_path: string
   filename: string
@@ -210,9 +219,146 @@ export interface WorkingPaper {
   file_type: 'pdf' | 'xlsx' | 'docx' | 'img' | 'other'
   file_size: number
   uploaded_by_user_id: number
+  uploaded_by_username: string | null
   uploaded_at: string
   description: string | null
   version_number: number
+  version_count: number
+  parent_version_id: number | null
+  superseded_at: string | null
+  sign_off_state: SignOffState
+  requires_reapproval: boolean
+  preparer_signed_off_by_user_id: number | null
+  preparer_signed_off_by_username: string | null
+  preparer_signed_off_at: string | null
+  reviewer_signed_off_by_user_id: number | null
+  reviewer_signed_off_by_username: string | null
+  reviewer_signed_off_at: string | null
+}
+
+export interface FolderNode {
+  path: string
+  label: string
+  fiscal_year_id: number | null
+  fiscal_year_status: string | null
+  document_count: number
+  unsigned_count: number
+  children: FolderNode[]
+}
+
+export interface WPAnnotation {
+  id: number
+  working_paper_id: number
+  user_id: number
+  username: string | null
+  text: string
+  created_at: string
+  is_resolved: boolean
+  resolved_by_user_id: number | null
+  resolved_by_username: string | null
+  resolved_at: string | null
+}
+
+export interface AuditLogEntry {
+  id: number
+  user_id: number | null
+  username: string | null
+  action: string
+  resource_type: string
+  resource_id: number | null
+  old_values: Record<string, unknown> | null
+  new_values: Record<string, unknown> | null
+  ip_address: string | null
+  timestamp: string
+  description: string
+}
+
+export interface AuditLogPage {
+  items: AuditLogEntry[]
+  limit: number
+  offset: number
+  has_more: boolean
+}
+
+export interface ActivityNotification {
+  id: number
+  timestamp: string
+  action: string
+  resource_type: string
+  resource_id: number | null
+  message: string
+  user_id: number | null
+  username: string | null
+}
+
+export interface UnpostedEntry {
+  id: number
+  reference: string | null
+  status: string
+  entry_type: string
+}
+
+export interface UnsignedDocument {
+  document_id: number
+  display_name: string
+  folder_path: string
+  state: SignOffState
+}
+
+export interface PreCloseCheck {
+  period_id: number
+  fiscal_year_id: number
+  already_closed: boolean
+  ready: boolean
+  unposted_journal_entries: UnpostedEntry[]
+  unsigned_documents: UnsignedDocument[]
+}
+
+export interface PeriodCloseBalance {
+  account_id: number
+  acct_fmtd: string
+  opening: string
+  ytd_debit: string
+  ytd_credit: string
+  period_debit: string
+  period_credit: string
+  aje_debit: string
+  aje_credit: string
+  rje_debit: string
+  rje_credit: string
+  closing: string
+}
+
+export interface PeriodClose {
+  id: number
+  period_id: number
+  period_name: string | null
+  fiscal_year_label: string | null
+  closed_by_user_id: number
+  closed_by_username: string | null
+  closed_at: string
+  notes: string | null
+  journal_entry_count: number
+  account_count: number
+  total_debits: string
+  total_credits: string
+  is_balanced: boolean
+  overrides: string | null
+  reopened_at: string | null
+  reopened_by_user_id: number | null
+  balances: PeriodCloseBalance[]
+}
+
+export interface RollForwardResult {
+  fiscal_year: FiscalYear
+  periods_created: number
+  accounts_copied: number
+  account_mappings_copied: number
+  classifications_copied: number
+  opening_balances_posted: number
+  opening_debits: string
+  opening_credits: string
+  balanced: boolean
 }
 
 export interface Report {

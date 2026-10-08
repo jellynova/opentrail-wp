@@ -18,7 +18,12 @@ export function formatCurrency(value: string | number | null | undefined): strin
 
 export function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '—'
-  return new Date(dateStr).toLocaleDateString('en-CA')
+  // Date-only values (2025-01-01) are calendar dates, not instants: parsing them as UTC
+  // midnight renders the previous day anywhere west of UTC — including BC.
+  const value = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? `${dateStr}T00:00:00` : dateStr
+  const date = new Date(value)
+  if (isNaN(date.getTime())) return '—'
+  return date.toLocaleDateString('en-CA')
 }
 
 export function formatDateTime(dateStr: string | null | undefined): string {
@@ -59,4 +64,25 @@ export function formatAmount(value: string | number | null | undefined, decimals
     maximumFractionDigits: decimals,
   }).format(Math.abs(num))
   return num < 0 ? `(${s})` : s
+}
+
+/** "3 min ago" style formatting for activity feeds. */
+export function formatRelativeTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return '—'
+  const then = new Date(dateStr).getTime()
+  if (isNaN(then)) return '—'
+  const seconds = Math.round((Date.now() - then) / 1000)
+  if (seconds < 45) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days} d ago`
+  return formatDate(dateStr)
+}
+
+/** Title-case a snake_case action or resource name for display. */
+export function humanise(value: string): string {
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }

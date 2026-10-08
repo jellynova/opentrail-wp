@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, TestTube2, RefreshCw, Loader2, Pencil, Trash2 } from 'lucide-react'
+import { Plus, TestTube2, RefreshCw, Loader2, Pencil, Trash2, Lock, Unlock, FastForward, ShieldAlert } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { Button } from '@/components/ui/button'
@@ -13,10 +13,24 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import api from '@/lib/api'
-import { apiErrorMessage, formatDate, formatDateTime } from '@/lib/utils'
+import { formatDate, formatDateTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
-import { useFiscalYears, useCreateFiscalYear, usePeriods, useCreatePeriod } from '@/hooks/useFiscalYears'
-import type { User, ExternalConnector, MappingScheme } from '@/types'
+import { useAuthStore } from '@/store/auth'
+import { apiErrorMessage, humanise } from '@/lib/utils'
+import {
+  useCloseFiscalYear,
+  useCreateFiscalYear,
+  useCreatePeriod,
+  useFiscalYears,
+  usePeriodClose,
+  usePeriodCloseCheck,
+  usePeriodCloseSnapshot,
+  usePeriodReopen,
+  usePeriods,
+  useRollForwardFiscalYear,
+} from '@/hooks/useFiscalYears'
+
+import type { Period, User, ExternalConnector, MappingScheme } from '@/types'
 
 // ── Users Tab ────────────────────────────────────────────────────────────────
 
@@ -385,6 +399,189 @@ function ConnectorsTab() {
 
 // ── Fiscal Years Tab ─────────────────────────────────────────────────────────
 
+/** Close / reopen one period, showing the pre-close checks first (PLAN §7.3). */
+function PeriodRow({
+  period,
+  onChanged,
+}: {
+  period: Period
+  onChanged: () => void
+}) {
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'finance_admin'
+  const [checkOpen, setCheckOpen] = useState(false)
+  const [reason, setReason] = useState('')
+
+  const { data: check, isLoading } = usePeriodCloseCheck(checkOpen ? period.id : null)
+  const { data: snapshot } = usePeriodCloseSnapshot(period.id, period.is_closed && checkOpen)
+  const close = usePeriodClose(period.id)
+  const reopen = usePeriodReopen(period.id)
+
+  const runClose = (force: boolean) =>
+    close.mutate(
+      { force },
+      {
+        onSuccess: () => {
+          toast({ title: `${period.name} closed` })
+          setCheckOpen(false)
+          onChanged()
+        },
+        onError: (err) =>
+          toast({ title: 'Could not close the period', description: apiErrorMessage(err), variant: 'destructive' }),
+      }
+    )
+
+  const runReopen = () =>
+    reopen.mutate(
+      { reason: reason || undefined },
+      {
+        onSuccess: () => {
+          toast({ title: `${period.name} reopened` })
+          setCheckOpen(false)
+          setReason('')
+          onChanged()
+        },
+        onError: (err) =>
+          toast({ title: 'Could not reopen the period', description: apiErrorMessage(err), variant: 'destructive' }),
+      }
+    )
+
+  return (
+    <div className="rounded-sm bg-muted/50 px-2 py-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs">{period.name}</span>
+        <div className="flex items-center gap-1">
+          <Badge variant={period.is_closed ? 'secondary' : 'success'} className="text-xs">
+            {period.is_closed ? 'Closed' : 'Open'}
+          </Badge>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-1"
+            title={period.is_closed ? 'Period close details / reopen' : 'Close this period'}
+            onClick={(e) => {
+              // Without this the click bubbles to the fiscal-year card, which collapses
+              // the period list and would unmount this dialog.
+              e.stopPropagation()
+              setCheckOpen(true)
+            }}
+          >
+            {period.is_closed ? <Unlock className="h-3 w-3" /> : <Lock className="h-3 w-3" />}
+          </Button>
+        </div>
+      </div>
+
+      <Dialog open={checkOpen} onOpenChange={(o) => !o && setCheckOpen(false)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              {period.is_closed ? `Reopen ${period.name}` : `Close ${period.name}`}
+            </DialogTitle>
+          </DialogHeader>
+
+          {period.is_closed ? (
+            <div className="space-y-3 py-2 text-sm">
+              {snapshot ? (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  <p>
+                    Closed by <span className="text-foreground">{snapshot.closed_by_username}</span> on{' '}
+                    {formatDateTime(snapshot.closed_at)}
+                  </p>
+                  <p>
+                    {snapshot.account_count} accounts · {snapshot.journal_entry_count} posted journal entries ·{' '}
+                    {snapshot.is_balanced ? 'balanced' : 'NOT balanced'}
+                  </p>
+                  {snapshot.overrides && <p className="text-amber-700">{snapshot.overrides}</p>}
+                  {snapshot.reopened_at && (
+                    <p className="text-amber-700">Reopened {formatDateTime(snapshot.reopened_at)}</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">Loading the close snapshot…</p>
+              )}
+              <div className="space-y-1">
+                <Label className="text-xs">Reason for reopening</Label>
+                <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. late invoice" />
+              </div>
+              {!isAdmin && (
+                <p className="text-xs text-muted-foreground">Only a finance_admin can reopen a closed period.</p>
+              )}
+            </div>
+          ) : isLoading ? (
+            <LoadingSpinner fullPage />
+          ) : (
+            <div className="space-y-3 py-2 text-sm">
+              {check?.ready ? (
+                <p className="text-green-700">
+                  All journal entries are posted and the year's working papers are signed off.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {check?.unposted_journal_entries.length ? (
+                    <div>
+                      <p className="text-xs font-medium text-destructive">Journal entries not posted</p>
+                      <ul className="ml-4 list-disc text-xs text-muted-foreground">
+                        {check.unposted_journal_entries.map((e) => (
+                          <li key={e.id}>
+                            {e.reference ?? `#${e.id}`} ({humanise(e.entry_type)}, {e.status})
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {check?.unsigned_documents.length ? (
+                    <div>
+                      <p className="text-xs font-medium text-amber-700">Working papers not signed off</p>
+                      <ul className="ml-4 list-disc text-xs text-muted-foreground">
+                        {check.unsigned_documents.map((d) => (
+                          <li key={d.document_id}>
+                            {d.display_name} ({humanise(d.state)})
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Closing snapshots the closing balance of every account so the period is frozen for audit.
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCheckOpen(false)}>Cancel</Button>
+            {period.is_closed ? (
+              <Button onClick={runReopen} disabled={!isAdmin || reopen.isPending}>
+                {reopen.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Reopen period
+              </Button>
+            ) : (
+              <>
+                {check && !check.ready && isAdmin && (
+                  <Button
+                    variant="outline"
+                    className="text-amber-700"
+                    onClick={() => runClose(true)}
+                    disabled={close.isPending}
+                    title="Close without the working-paper sign-offs (finance_admin only)"
+                  >
+                    <ShieldAlert className="mr-2 h-4 w-4" /> Force close
+                  </Button>
+                )}
+                <Button onClick={() => runClose(false)} disabled={close.isPending || !check?.ready}>
+                  {close.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Close period
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 function FiscalYearsTab() {
   const [createFYOpen, setCreateFYOpen] = useState(false)
   const [label, setLabel] = useState('')
@@ -398,9 +595,13 @@ function FiscalYearsTab() {
   const [periodEnd, setPeriodEnd] = useState('')
 
   const { data: fiscalYears, isLoading } = useFiscalYears()
-  const { data: periods } = usePeriods(selectedFYId)
+  const { data: periods, refetch: refetchPeriods } = usePeriods(selectedFYId)
   const createFY = useCreateFiscalYear()
   const createPeriod = useCreatePeriod(selectedFYId ?? 0)
+  const closeYear = useCloseFiscalYear()
+  const rollForward = useRollForwardFiscalYear()
+  const [rollForwardFor, setRollForwardFor] = useState<number | null>(null)
+  const [rollForwardLabel, setRollForwardLabel] = useState('')
 
   return (
     <div className="space-y-4">
@@ -434,6 +635,51 @@ function FiscalYearsTab() {
                 <p className="text-xs text-muted-foreground">
                   {formatDate(fy.start_date)} – {formatDate(fy.end_date)}
                 </p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {fy.status === 'open' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-xs"
+                      disabled={closeYear.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (!confirm(`Close ${fy.label}? Every period is closed and snapshotted in order.`)) return
+                        closeYear.mutate(
+                          { fiscalYearId: fy.id },
+                          {
+                            onSuccess: () => {
+                              toast({ title: `Fiscal year ${fy.label} closed` })
+                              setSelectedFYId(fy.id)
+                            },
+                            onError: (err) =>
+                              toast({
+                                title: 'Could not close the fiscal year',
+                                description: apiErrorMessage(err),
+                                variant: 'destructive',
+                              }),
+                          }
+                        )
+                      }}
+                    >
+                      <Lock className="mr-1 h-3 w-3" /> Close year
+                    </Button>
+                  )}
+                  {fy.status === 'closed' && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-xs"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setRollForwardFor(fy.id)
+                        setRollForwardLabel(String(Number(fy.label) + 1 || ''))
+                      }}
+                    >
+                      <FastForward className="mr-1 h-3 w-3" /> Roll forward
+                    </Button>
+                  )}
+                </div>
                 {selectedFYId === fy.id && periods && (
                   <div className="mt-3 space-y-1">
                     <div className="flex items-center justify-between">
@@ -448,12 +694,7 @@ function FiscalYearsTab() {
                       </Button>
                     </div>
                     {periods.map((p) => (
-                      <div key={p.id} className="flex items-center justify-between rounded-sm bg-muted/50 px-2 py-1">
-                        <span className="text-xs">{p.name}</span>
-                        <Badge variant={p.is_closed ? 'secondary' : 'success'} className="text-xs">
-                          {p.is_closed ? 'Closed' : 'Open'}
-                        </Badge>
-                      </div>
+                      <PeriodRow key={p.id} period={p} onChanged={() => void refetchPeriods()} />
                     ))}
                   </div>
                 )}
@@ -462,6 +703,57 @@ function FiscalYearsTab() {
           ))}
         </div>
       )}
+
+      {/* Roll forward dialog */}
+      <Dialog open={rollForwardFor !== null} onOpenChange={(o) => !o && setRollForwardFor(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Roll forward fiscal year</DialogTitle></DialogHeader>
+          <div className="space-y-3 py-2 text-sm">
+            <p className="text-xs text-muted-foreground">
+              Creates the next fiscal year with 12 periods, copies the chart of accounts, ERP mappings and mapping
+              classifications, and posts each account&apos;s closing balance as the new opening balance.
+            </p>
+            <div className="space-y-1">
+              <Label>New fiscal year label</Label>
+              <Input
+                value={rollForwardLabel}
+                onChange={(e) => setRollForwardLabel(e.target.value)}
+                placeholder="e.g. 2026"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRollForwardFor(null)}>Cancel</Button>
+            <Button
+              disabled={rollForward.isPending}
+              onClick={() =>
+                rollForward.mutate(
+                  { fiscalYearId: rollForwardFor as number, label: rollForwardLabel || undefined },
+                  {
+                    onSuccess: (result) => {
+                      toast({
+                        title: `Fiscal year ${result.fiscal_year.label} created`,
+                        description: `${result.accounts_copied} accounts, ${result.opening_balances_posted} opening balances (${result.balanced ? 'balanced' : 'out of balance'})`,
+                      })
+                      setRollForwardFor(null)
+                      setSelectedFYId(result.fiscal_year.id)
+                    },
+                    onError: (err) =>
+                      toast({
+                        title: 'Roll forward failed',
+                        description: apiErrorMessage(err),
+                        variant: 'destructive',
+                      }),
+                  }
+                )
+              }
+            >
+              {rollForward.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Roll forward
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Create FY Dialog */}
       <Dialog open={createFYOpen} onOpenChange={(o) => !o && setCreateFYOpen(false)}>

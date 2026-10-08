@@ -6,6 +6,7 @@ import {
   FileText,
   BarChart3,
   Folder,
+  History,
   Settings,
   LogOut,
   ChevronRight,
@@ -23,6 +24,8 @@ const navItems = [
   { to: '/budget', icon: BarChart3, label: 'Budget' },
   { to: '/documents', icon: Folder, label: 'Documents' },
 ]
+
+const activityItem = { to: '/activity', icon: History, label: 'Activity' }
 
 const adminItem = { to: '/admin', icon: Settings, label: 'Admin' }
 
@@ -70,6 +73,23 @@ export function Sidebar() {
             {item.label}
           </NavLink>
         ))}
+
+        {hasRole(['finance_admin', 'finance_officer']) && (
+          <NavLink
+            to={activityItem.to}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
+              )
+            }
+          >
+            <activityItem.icon className="h-4 w-4 shrink-0" />
+            {activityItem.label}
+          </NavLink>
+        )}
 
         {hasRole(['finance_admin']) && (
           <NavLink
