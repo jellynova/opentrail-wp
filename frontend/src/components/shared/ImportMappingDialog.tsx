@@ -134,7 +134,7 @@ function ColumnAssign({
   )
   return (
     <Select
-      value={owner ? String(col) : IGNORE}
+      value={owner ? owner.key : IGNORE}
       onValueChange={(v) => {
         if (v === IGNORE) {
           if (owner) onAssign(owner.key, null)
@@ -257,7 +257,7 @@ export function ImportMappingDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!importing) onOpenChange(o) }}>
-      <DialogContent className="max-w-5xl">
+      <DialogContent className="flex max-h-[90vh] w-[95vw] max-w-5xl flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Table2 className="h-4 w-4" /> {title}
@@ -279,7 +279,7 @@ export function ImportMappingDialog({
             <p className="text-sm text-destructive">Could not read the file: {apiErrorMessage(preview.error)}</p>
           </div>
         ) : preview.data ? (
-          <div className="space-y-3">
+          <div className="min-w-0 flex-1 space-y-3 overflow-y-auto">
             <div className="flex flex-wrap items-end gap-3">
               <div className="text-xs text-muted-foreground">
                 {preview.data.file_name} — detected as <b>{preview.data.file_type}</b>, {preview.data.total_rows} rows
@@ -324,8 +324,8 @@ export function ImportMappingDialog({
               </div>
             </div>
 
-            <div className="overflow-auto rounded-md border" style={{ maxHeight: '36vh' }}>
-              <table className="w-full border-collapse text-xs">
+            <div className="min-w-0 overflow-auto rounded-md border" style={{ maxHeight: '36vh' }}>
+              <table className="w-max min-w-full border-collapse text-xs">
                 <thead className="sticky top-0 z-10 bg-muted/95 backdrop-blur-sm">
                   <tr>
                     <th className="border-b p-1" />
@@ -356,8 +356,8 @@ export function ImportMappingDialog({
 
             <div className="space-y-1">
               <Label className="text-xs">Preview — rows as they will be imported</Label>
-              <div className="overflow-auto rounded-md border" style={{ maxHeight: '15vh' }}>
-                <table className="w-full text-xs">
+              <div className="min-w-0 overflow-auto rounded-md border" style={{ maxHeight: '15vh' }}>
+                <table className="w-max min-w-full text-xs">
                   <thead className="bg-muted/60">
                     <tr>
                       {mappedFields.map((f) => (
