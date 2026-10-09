@@ -11,6 +11,7 @@ from app.core.security import get_current_active_user, require_role
 from app.models.period import FiscalYear
 from app.models.sofi import SofiEntry
 from app.models.user import User
+from app.services import import_parsers
 from app.services import sofi as sofi_svc
 
 router = APIRouter()
@@ -88,13 +89,17 @@ async def import_entries(
     fiscal_year_id: int = Query(...),
     schedule_type: ScheduleType = Query(...),
     replace: bool = Query(True, description="Replace existing entries of this type for the year"),
+    sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
-    """Import from CSV (e.g. AP vendor payment history or a payroll T4 summary export)."""
+    """Import from CSV, Excel or a QuickBooks/Sage export (AP payment history, T4 summary, …)."""
     _require_fy(db, fiscal_year_id)
-    imported, errors = sofi_svc.import_entries(db, fiscal_year_id, schedule_type, await file.read(), replace)
+    content = await file.read()
+    sheet_param = file.filename and import_parsers.sniff_format(file.filename, content) == "xlsx"
+    imported, errors = sofi_svc.import_entries(
+        db, fiscal_year_id, schedule_type, content, replace, sheet=sheet if sheet_param else None)
     return {"records_imported": imported, "errors": errors}
 
 

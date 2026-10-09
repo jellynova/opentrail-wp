@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
@@ -18,6 +18,7 @@ from app.schemas.trial_balance import (
 )
 from app.models.period import FiscalYear, Period
 from app.services import audit as audit_svc
+from app.services import import_parsers
 from app.services import locking
 from app.services import trial_balance as tb_svc
 
@@ -63,11 +64,12 @@ async def import_csv(
     opening_credit_col: str = Query("Opening Credit", description="CSV column name for opening credit"),
     ytd_debit_col: str = Query("YTD Debit", description="CSV column name for YTD debit"),
     ytd_credit_col: str = Query("YTD Credit", description="CSV column name for YTD credit"),
+    sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
-    """Import trial balance from a CSV file upload."""
+    """Import trial balance from a CSV, Excel, QuickBooks or Sage export."""
     column_mapping = {
         acct_fmtd_col: "acct_fmtd",
         period_debit_col: "period_debit",
@@ -80,6 +82,17 @@ async def import_csv(
 
     ensure_period_editable(db, period_id)
     content = await file.read()
+    # CSV keeps the historical exact behaviour; everything else (xlsx, tab-delimited,
+    # IIF, HTML report exports, Sage variants) is normalised by the shared parser and
+    # mapped onto the canonical Account/Debit/Credit columns the service expects.
+    if import_parsers.sniff_format(file.filename or "", content) != "csv":
+        try:
+            fieldnames, rows = import_parsers.load_rows(content, file.filename or "", sheet)
+            tb_mapping, rows = import_parsers.canonicalize_tb_rows(fieldnames, rows)
+            column_mapping = tb_mapping
+            content = import_parsers.to_csv_bytes(["Account", "Debit", "Credit"], rows)
+        except import_parsers.ImportParseError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     imported, updated, errors = tb_svc.import_from_csv(
         db=db,
         period_id=period_id,

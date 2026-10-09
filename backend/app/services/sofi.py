@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.period import FiscalYear
 from app.models.sofi import SofiEntry
+from app.services import import_parsers
 
 SCHEDULE_TYPES = ("supplier_payment", "employee_remuneration", "guarantee_indemnity")
 DEFAULT_THRESHOLDS = {"supplier_payment": Decimal("25000"), "employee_remuneration": Decimal("75000")}
@@ -48,8 +49,15 @@ def _dec(value: Any) -> Decimal:
     return Decimal(s) if s else ZERO
 
 
-def parse_csv(content: bytes) -> Tuple[List[Dict[str, Any]], List[str]]:
+def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Parse a CSV export into entry dicts. Returns (rows, errors)."""
+    # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
+    # normalised by the shared parser into the same shape before alias mapping.
+    if import_parsers.sniff_format("", content) != "csv":
+        try:
+            content = import_parsers.normalise_to_csv(content, "", sheet)
+        except import_parsers.ImportParseError as exc:
+            return [], [str(exc)]
     reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
     headers = {h.strip().lower(): h for h in (reader.fieldnames or [])}
     columns = {field: next((headers[a] for a in aliases if a in headers), None) for field, aliases in CSV_ALIASES.items()}
@@ -80,8 +88,8 @@ def parse_csv(content: bytes) -> Tuple[List[Dict[str, Any]], List[str]]:
 
 
 def import_entries(db: Session, fiscal_year_id: int, schedule_type: str, content: bytes,
-                   replace: bool = True) -> Tuple[int, List[str]]:
-    rows, errors = parse_csv(content)
+                   replace: bool = True, sheet: Optional[str] = None) -> Tuple[int, List[str]]:
+    rows, errors = parse_csv(content, sheet=sheet)
     if replace and rows:
         for e in db.scalars(select(SofiEntry).where(
             SofiEntry.fiscal_year_id == fiscal_year_id, SofiEntry.schedule_type == schedule_type

@@ -559,13 +559,14 @@ def consolidate_budget(
 async def import_budget_lines_csv(
     budget_year_id: int,
     file: UploadFile = File(...),
+    sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
-    """Replace budget lines from a CSV with Account and Amount columns."""
+    """Replace budget lines from a CSV/Excel export with Account and Amount columns."""
     by = _budget_year_or_404(db, budget_year_id)
     _require_not_adopted(by)
-    totals, errors = bsvc.lines_from_csv(db, by, await file.read())
+    totals, errors = bsvc.lines_from_csv(db, by, await file.read(), sheet=sheet)
     count = bsvc.replace_lines(db, by, totals) if totals else 0
     return {"lines": count, "errors": errors}
 

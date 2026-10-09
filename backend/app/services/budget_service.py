@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.models.account import Account
 from app.models.budget import BudgetAmendment, BudgetAmendmentLine, BudgetLine, BudgetRequest, BudgetYear
 from app.models.period import FiscalYear, Period
+from app.services import import_parsers
 from app.services.balances import (
     ZERO,
     account_balances,
@@ -138,8 +139,16 @@ def replace_lines(db: Session, budget_year: BudgetYear, totals: Dict[int, Decima
     return len(totals)
 
 
-def lines_from_csv(db: Session, budget_year: BudgetYear, content: bytes) -> Tuple[Dict[int, Decimal], List[str]]:
+def lines_from_csv(db: Session, budget_year: BudgetYear, content: bytes,
+                   sheet: Optional[str] = None) -> Tuple[Dict[int, Decimal], List[str]]:
     """CSV with Account and Amount columns (case-insensitive). Amounts summed per account."""
+    # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
+    # normalised by the shared parser into the same shape first.
+    if import_parsers.sniff_format("", content) != "csv":
+        try:
+            content = import_parsers.normalise_to_csv(content, "", sheet)
+        except import_parsers.ImportParseError as exc:
+            return {}, [str(exc)]
     reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
     headers = {h.strip().lower(): h for h in (reader.fieldnames or [])}
     acct_col = next((headers[h] for h in ("account", "acct_fmtd", "account no", "gl account") if h in headers), None)
@@ -156,7 +165,7 @@ def lines_from_csv(db: Session, budget_year: BudgetYear, content: bytes) -> Tupl
             errors.append(f"Row {line_no}: account '{code}' not found")
             continue
         try:
-            amount = Decimal((row.get(amt_col) or "0").replace(",", "").replace("$", "").strip() or "0")
+            amount = import_parsers.parse_amount(row.get(amt_col))
         except Exception:
             errors.append(f"Row {line_no}: invalid amount")
             continue

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.period import FiscalYear
 from app.models.tca import TcaScheduleLine
+from app.services import import_parsers
 from app.services.balances import (
     ZERO,
     account_balances,
@@ -53,8 +54,15 @@ def _dec(value: Any) -> Decimal:
     return Decimal(s) if s else ZERO
 
 
-def parse_csv(content: bytes) -> Tuple[List[Dict[str, Any]], List[str]]:
+def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Parse a TCA continuity spreadsheet export into line dicts. Returns (rows, errors)."""
+    # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
+    # normalised by the shared parser into the same shape before alias mapping.
+    if import_parsers.sniff_format("", content) != "csv":
+        try:
+            content = import_parsers.normalise_to_csv(content, "", sheet)
+        except import_parsers.ImportParseError as exc:
+            return [], [str(exc)]
     reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
     headers = {h.strip().lower(): h for h in (reader.fieldnames or [])}
     columns = {
@@ -120,8 +128,9 @@ def replace_lines(db: Session, fiscal_year_id: int, rows: List[Dict[str, Any]], 
     return len(rows)
 
 
-def import_csv(db: Session, fiscal_year_id: int, content: bytes, replace: bool = True) -> Tuple[int, List[str]]:
-    rows, errors = parse_csv(content)
+def import_csv(db: Session, fiscal_year_id: int, content: bytes, replace: bool = True,
+               sheet: Optional[str] = None) -> Tuple[int, List[str]]:
+    rows, errors = parse_csv(content, sheet=sheet)
     if not rows:
         return 0, errors
     if replace:

@@ -26,6 +26,7 @@ from app.schemas.tca import (
     TcaRollForwardResponse,
 )
 from app.services import audit as audit_svc
+from app.services import import_parsers
 from app.services import tca as tca_svc
 
 router = APIRouter()
@@ -112,12 +113,13 @@ async def import_tca_lines(
     fiscal_year_id: int = Query(...),
     replace: bool = Query(True, description="Replace the schedule, or merge into it"),
     file: UploadFile = File(...),
+    sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS)),
 ):
-    """Import a continuity schedule from CSV (the municipality's asset register export)."""
+    """Import a continuity schedule from CSV, Excel or a QuickBooks/Sage export."""
     fy = _require_writable(db, fiscal_year_id)
-    imported, errors = tca_svc.import_csv(db, fiscal_year_id, await file.read(), replace=replace)
+    imported, errors = tca_svc.import_csv(db, fiscal_year_id, await file.read(), replace=replace, sheet=sheet)
     if imported:
         audit_svc.record(
             db, user=current_user, action="import", resource_type="tca_schedule", resource_id=fiscal_year_id,
