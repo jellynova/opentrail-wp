@@ -645,3 +645,57 @@ def roll_forward(
     db.refresh(target)
     summary["fiscal_year"] = target
     return summary
+
+
+def reopen_fiscal_year(
+    db: Session,
+    fiscal_year_id: int,
+    user: User,
+    *,
+    reason: str,
+    force: bool = False,
+    request: Any = None,
+) -> Dict[str, Any]:
+    """
+    Reopen a closed fiscal year (finance_admin only, audited).
+
+    Only the year's status flips back to open — its periods are left exactly as
+    they are, so the response reports which of them are still closed and the UI
+    can offer to reopen them individually. A *locked* year additionally requires
+    ``force``, and the override is recorded in the audit trail.
+    """
+    fy = db.get(FiscalYear, fiscal_year_id)
+    if fy is None:
+        raise LookupError("Fiscal year not found")
+    if fy.status == "open":
+        raise CloseBlocked([f"Fiscal year {fy.label} is already open"])
+    if fy.status == "locked" and not force:
+        raise CloseBlocked([f"Fiscal year {fy.label} is locked; force is required to reopen it"])
+
+    old_status = fy.status
+    fy.status = "open"
+    db.flush()
+
+    closed_periods = db.scalars(
+        select(Period)
+        .where(Period.fiscal_year_id == fiscal_year_id, Period.is_closed.is_(True))
+        .order_by(Period.period_number)
+    ).all()
+
+    audit_svc.record(
+        db,
+        user=user,
+        action="reopen",
+        resource_type="fiscal_year",
+        resource_id=fy.id,
+        old={"status": old_status},
+        new={"status": fy.status, "reason": reason, "forced": force},
+        summary=(
+            f"reopened fiscal year {fy.label}"
+            + (" (locked year, forced)" if old_status == "locked" else "")
+        ),
+        request=request,
+        commit=True,
+    )
+    db.refresh(fy)
+    return {"fiscal_year": fy, "prior_status": old_status, "forced": force, "closed_periods": closed_periods}

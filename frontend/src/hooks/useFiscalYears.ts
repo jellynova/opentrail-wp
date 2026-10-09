@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
-import type { FiscalYear, Period, PeriodClose, PreCloseCheck, RollForwardResult } from '@/types'
+import type { FiscalYear, FiscalYearReopenResult, Period, PeriodClose, PreCloseCheck, RollForwardResult } from '@/types'
 
 export function useFiscalYears() {
   return useQuery({
@@ -88,8 +88,10 @@ export function usePeriodClose(periodId: number | null) {
 
 export function usePeriodReopen(periodId: number | null) {
   return usePeriodMutation(
-    ({ reason }: { reason?: string }) =>
-      api.post<Period>(`/v1/periods/${periodId}/reopen`, { reason }).then((r) => r.data)
+    ({ reason, periodId: overrideId }: { reason?: string; periodId?: number }) =>
+      api
+        .post<Period>(`/v1/periods/${overrideId ?? periodId}/reopen`, { reason })
+        .then((r) => r.data)
   )
 }
 
@@ -115,4 +117,15 @@ export function usePeriodCloseSnapshot(periodId: number | null, enabled: boolean
     queryFn: () => api.get<PeriodClose>(`/v1/periods/${periodId}/close`).then((r) => r.data),
     enabled: periodId !== null && enabled,
   })
+}
+
+// ── Fiscal-year reopen (finance_admin only, audited) ─────────────────────────
+
+export function useReopenFiscalYear() {
+  return usePeriodMutation(
+    ({ fiscalYearId, reason, force }: { fiscalYearId: number; reason: string; force?: boolean }) =>
+      api
+        .post<FiscalYearReopenResult>(`/v1/fiscal-years/${fiscalYearId}/reopen`, { reason, force })
+        .then((r) => r.data)
+  )
 }

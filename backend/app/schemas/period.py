@@ -76,6 +76,28 @@ class RollForwardRequest(BaseModel):
     label: Optional[str] = None  # defaults to the year after the source fiscal year
 
 
+class FiscalYearReopenRequest(BaseModel):
+    reason: str
+    # Required to reopen a *locked* year; ordinary closed years need only a reason.
+    force: bool = False
+
+
+class ClosedPeriodInfo(BaseModel):
+    id: int
+    period_number: int
+    name: str
+    is_closed: bool
+
+
+class FiscalYearReopenResponse(BaseModel):
+    fiscal_year_id: int
+    label: str
+    status: str
+    forced: bool
+    periods_still_closed: int
+    closed_periods: List[ClosedPeriodInfo] = []
+
+
 class UnpostedEntry(BaseModel):
     id: int
     reference: Optional[str]

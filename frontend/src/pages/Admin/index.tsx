@@ -6,6 +6,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -27,10 +28,11 @@ import {
   usePeriodCloseSnapshot,
   usePeriodReopen,
   usePeriods,
+  useReopenFiscalYear,
   useRollForwardFiscalYear,
 } from '@/hooks/useFiscalYears'
 
-import type { Period, User, ExternalConnector, MappingScheme } from '@/types'
+import type { FiscalYear, FiscalYearReopenResult, Period, User, ExternalConnector, MappingScheme } from '@/types'
 
 // ── Users Tab ────────────────────────────────────────────────────────────────
 
@@ -583,6 +585,7 @@ function PeriodRow({
 }
 
 function FiscalYearsTab() {
+  const isAdmin = useAuthStore((s) => s.user?.role === 'finance_admin')
   const [createFYOpen, setCreateFYOpen] = useState(false)
   const [label, setLabel] = useState('')
   const [startDate, setStartDate] = useState('')
@@ -600,8 +603,73 @@ function FiscalYearsTab() {
   const createPeriod = useCreatePeriod(selectedFYId ?? 0)
   const closeYear = useCloseFiscalYear()
   const rollForward = useRollForwardFiscalYear()
+  const reopenYear = useReopenFiscalYear()
   const [rollForwardFor, setRollForwardFor] = useState<number | null>(null)
   const [rollForwardLabel, setRollForwardLabel] = useState('')
+  const [reopenFor, setReopenFor] = useState<FiscalYear | null>(null)
+  const [reopenReason, setReopenReason] = useState('')
+  const [reopenForce, setReopenForce] = useState(false)
+  const [reopenResult, setReopenResult] = useState<FiscalYearReopenResult | null>(null)
+  const [periodsToReopen, setPeriodsToReopen] = useState<Set<number>>(new Set())
+  const reopenPeriod = usePeriodReopen(null)
+
+  const submitReopen = () => {
+    if (!reopenFor || !reopenReason.trim()) return
+    reopenYear.mutate(
+      { fiscalYearId: reopenFor.id, reason: reopenReason.trim(), force: reopenForce },
+      {
+        onSuccess: (result) => {
+          toast({
+            title: `Fiscal year ${result.label} reopened`,
+            description:
+              result.periods_still_closed > 0
+                ? `${result.periods_still_closed} period(s) are still closed — reopen them individually if needed.`
+                : undefined,
+            variant: result.forced ? 'destructive' : undefined,
+          })
+          setReopenResult(result)
+          setPeriodsToReopen(new Set(result.closed_periods.map((p) => p.id)))
+          setReopenFor(null)
+          setReopenReason('')
+          setReopenForce(false)
+        },
+        onError: (err) =>
+          toast({ title: 'Reopen failed', description: apiErrorMessage(err), variant: 'destructive' }),
+      }
+    )
+  }
+
+  const reopenSelectedPeriods = () => {
+    if (!reopenResult) return
+    const ids = [...periodsToReopen]
+    if (!ids.length) return
+    let done = 0
+    let failed = 0
+    const reason = `Fiscal year ${reopenResult.label} reopen follow-up`
+    ids.forEach((id) => {
+      reopenPeriod.mutate(
+        { reason, periodId: id },
+        {
+          onSuccess: () => {
+            done += 1
+            if (done + failed === ids.length) {
+              toast({ title: `Reopened ${done} period(s)${failed ? `, ${failed} failed` : ''}` })
+              setReopenResult(null)
+              setPeriodsToReopen(new Set())
+            }
+          },
+          onError: () => {
+            failed += 1
+            if (done + failed === ids.length) {
+              toast({ title: `Reopened ${done} period(s), ${failed} failed`, variant: 'destructive' })
+              setReopenResult(null)
+              setPeriodsToReopen(new Set())
+            }
+          },
+        }
+      )
+    })
+  }
 
   return (
     <div className="space-y-4">
@@ -677,6 +745,21 @@ function FiscalYearsTab() {
                       }}
                     >
                       <FastForward className="mr-1 h-3 w-3" /> Roll forward
+                    </Button>
+                  )}
+                  {(fy.status === 'closed' || fy.status === 'locked') && isAdmin && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 text-xs text-amber-700"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setReopenFor(fy)
+                        setReopenReason('')
+                        setReopenForce(fy.status === 'locked')
+                      }}
+                    >
+                      <Unlock className="mr-1 h-3 w-3" /> Reopen year
                     </Button>
                   )}
                 </div>
@@ -759,6 +842,103 @@ function FiscalYearsTab() {
             >
               {rollForward.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Roll forward
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reopen year dialog: requires a reason; periods stay closed */}
+      <Dialog open={reopenFor !== null} onOpenChange={(o) => !o && setReopenFor(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Reopen fiscal year {reopenFor?.label}</DialogTitle></DialogHeader>
+          <div className="space-y-3 py-2 text-sm">
+            {reopenFor?.status === 'locked' && (
+              <p className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                This fiscal year is <strong>locked</strong>. Reopening it requires the force override, which is
+                recorded in the audit trail.
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Only the year&apos;s status changes. Its periods stay closed until each is reopened individually —
+              you can do that right after, in the follow-up dialog.
+            </p>
+            <div className="space-y-1">
+              <Label>Reason (required, audited)</Label>
+              <Textarea
+                value={reopenReason}
+                onChange={(e) => setReopenReason(e.target.value)}
+                placeholder="e.g. Late adjusting entry for the Q3 grant received after close"
+                rows={3}
+              />
+            </div>
+            {reopenFor?.status === 'locked' && (
+              <label className="flex items-center gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={reopenForce}
+                  onChange={(e) => setReopenForce(e.target.checked)}
+                />
+                Force (required for a locked year)
+              </label>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReopenFor(null)}>Cancel</Button>
+            <Button
+              disabled={!reopenReason.trim() || reopenYear.isPending || (reopenFor?.status === 'locked' && !reopenForce)}
+              onClick={submitReopen}
+            >
+              {reopenYear.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Reopen year
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Follow-up: pick the still-closed periods to reopen in batch */}
+      <Dialog open={reopenResult !== null} onOpenChange={(o) => !o && setReopenResult(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {reopenResult?.label} reopened — {reopenResult?.periods_still_closed} period(s) still closed
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 py-2 text-sm">
+            <p className="text-xs text-muted-foreground">
+              Reopening the year did not touch its periods. Tick the ones to reopen now (each reopen is audited).
+            </p>
+            <div className="max-h-72 overflow-y-auto rounded-md border divide-y">
+              {reopenResult?.closed_periods.map((p) => (
+                <label key={p.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={periodsToReopen.has(p.id)}
+                    onChange={(e) => {
+                      const next = new Set(periodsToReopen)
+                      if (e.target.checked) next.add(p.id)
+                      else next.delete(p.id)
+                      setPeriodsToReopen(next)
+                    }}
+                  />
+                  <span className="w-8 text-muted-foreground">P{p.period_number}</span>
+                  <span>{p.name}</span>
+                </label>
+              ))}
+              {!reopenResult?.closed_periods.length && (
+                <p className="px-3 py-4 text-sm text-muted-foreground">No closed periods left.</p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReopenResult(null)}>
+              Leave them closed
+            </Button>
+            <Button
+              disabled={!periodsToReopen.size || reopenPeriod.isPending}
+              onClick={reopenSelectedPeriods}
+            >
+              {reopenPeriod.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Reopen selected ({periodsToReopen.size})
             </Button>
           </DialogFooter>
         </DialogContent>

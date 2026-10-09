@@ -10,6 +10,8 @@ from app.models.user import User
 from app.schemas.period import (
     CloseRequest,
     FiscalYearCreate,
+    FiscalYearReopenRequest,
+    FiscalYearReopenResponse,
     FiscalYearUpdate,
     FiscalYearResponse,
     FiscalYearWithPeriods,
@@ -380,6 +382,45 @@ def close_fiscal_year(
     except close_svc.CloseBlocked as exc:
         raise _close_blocked(exc)
     return result["fiscal_year"]
+
+
+@router.post("/fiscal-years/{fiscal_year_id}/reopen", response_model=FiscalYearReopenResponse)
+def reopen_fiscal_year(
+    fiscal_year_id: int,
+    request: Request,
+    data: FiscalYearReopenRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("finance_admin")),
+):
+    """
+    Reopen a closed fiscal year (finance_admin only, audited).
+
+    Only the year's status flips back to open — its periods stay closed until each
+    is reopened individually via POST /periods/{id}/reopen. Reopening a *locked*
+    year requires ``force`` in the body, and the override is audited.
+    """
+    try:
+        result = close_svc.reopen_fiscal_year(
+            db, fiscal_year_id, current_user, reason=data.reason, force=data.force, request=request
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except close_svc.CloseBlocked as exc:
+        raise _close_blocked(exc)
+
+    fy = result["fiscal_year"]
+    closed_periods = result["closed_periods"]
+    return FiscalYearReopenResponse(
+        fiscal_year_id=fy.id,
+        label=fy.label,
+        status=fy.status,
+        forced=result["forced"],
+        periods_still_closed=len(closed_periods),
+        closed_periods=[
+            {"id": p.id, "period_number": p.period_number, "name": p.name, "is_closed": p.is_closed}
+            for p in closed_periods
+        ],
+    )
 
 
 @router.post("/fiscal-years/{fiscal_year_id}/roll-forward", response_model=RollForwardResponse)
