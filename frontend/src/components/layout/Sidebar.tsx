@@ -10,6 +10,7 @@ import {
   Settings,
   LogOut,
   ChevronRight,
+  ClipboardList,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/trial-balance', icon: Table2, label: 'Trial Balance' },
   { to: '/journal-entries', icon: PenLine, label: 'Journal Entries' },
   { to: '/reports', icon: FileText, label: 'Reports' },
+  { to: '/leadsheets', icon: ClipboardList, label: 'Leadsheets' },
   { to: '/budget', icon: BarChart3, label: 'Budget' },
   { to: '/documents', icon: Folder, label: 'Documents' },
 ]

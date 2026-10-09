@@ -56,6 +56,11 @@ class WorkingPaper(Base):
     annotations: Mapped[list["WPAnnotation"]] = relationship(
         "WPAnnotation", back_populates="working_paper", cascade="all, delete-orphan"
     )
+    # Leadsheet account codes this document supports (PLAN §4.3). No cascade: links
+    # are removed explicitly, and deleting a document removes them at the DB level.
+    account_links: Mapped[list["DocumentAccountLink"]] = relationship(
+        "DocumentAccountLink", back_populates="working_paper"
+    )
 
     @property
     def root_id(self) -> int:

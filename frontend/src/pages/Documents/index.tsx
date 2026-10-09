@@ -48,7 +48,8 @@ import {
   useUploadDocument,
   useUploadNewVersion,
 } from '@/hooks/useDocuments'
-import type { FolderNode, SignOffState, WPAnnotation, WorkingPaper } from '@/types'
+import { useAllAccountLinks } from '@/hooks/useLeadsheets'
+import type { AccountLink, FolderNode, SignOffState, WPAnnotation, WorkingPaper } from '@/types'
 
 function FileTypeIcon({ type }: { type: WorkingPaper['file_type'] }) {
   switch (type) {
@@ -452,6 +453,7 @@ export function DocumentsPage() {
 
   const [selectedFolder, setSelectedFolder] = useState('/current')
   const [fiscalYearFilter, setFiscalYearFilter] = useState<number | null>(null)
+  const [accountFilter, setAccountFilter] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadFiscalYear, setUploadFiscalYear] = useState<number | null>(null)
   const [uploadDescription, setUploadDescription] = useState('')
@@ -469,6 +471,26 @@ export function DocumentsPage() {
     folder_path: selectedFolder,
     fiscal_year_id: fiscalYearFilter,
   })
+  // Leadsheet account codes linked to each document in the current filter.
+  const { data: allLinks } = useAllAccountLinks(fiscalYearFilter)
+
+  const linksByDocument = useMemo(() => {
+    const m = new Map<number, AccountLink[]>()
+    for (const l of allLinks ?? []) {
+      const list = m.get(l.working_paper_id) ?? []
+      list.push(l)
+      m.set(l.working_paper_id, list)
+    }
+    return m
+  }, [allLinks])
+
+  const visibleDocuments = useMemo(() => {
+    const q = accountFilter.trim().toLowerCase()
+    if (!q) return documents ?? []
+    return (documents ?? []).filter((d) =>
+      (linksByDocument.get(d.id) ?? []).some((l) => l.account_code.toLowerCase().includes(q))
+    )
+  }, [documents, linksByDocument, accountFilter])
 
   const upload = useUploadDocument()
   const updateDocument = useUpdateDocument()
@@ -541,16 +563,24 @@ export function DocumentsPage() {
         <div className="flex-1 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium">{selectedFolder}</p>
-            <select
-              className="rounded-md border bg-background px-2 py-1 text-xs"
-              value={fiscalYearFilter ?? ''}
-              onChange={(e) => setFiscalYearFilter(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">All fiscal years</option>
-              {fiscalYears?.map((fy) => (
-                <option key={fy.id} value={fy.id}>{fy.label}</option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2">
+              <Input
+                className="h-8 w-44 text-xs"
+                placeholder="Filter by linked account…"
+                value={accountFilter}
+                onChange={(e) => setAccountFilter(e.target.value)}
+              />
+              <select
+                className="rounded-md border bg-background px-2 py-1 text-xs"
+                value={fiscalYearFilter ?? ''}
+                onChange={(e) => setFiscalYearFilter(e.target.value ? Number(e.target.value) : null)}
+              >
+                <option value="">All fiscal years</option>
+                {fiscalYears?.map((fy) => (
+                  <option key={fy.id} value={fy.id}>{fy.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div
@@ -590,12 +620,13 @@ export function DocumentsPage() {
                     <TableHead className="w-24">Size</TableHead>
                     <TableHead className="w-20">Version</TableHead>
                     <TableHead className="w-32">Sign-off</TableHead>
+                    <TableHead className="w-40">Linked accounts</TableHead>
                     <TableHead className="w-40">Uploaded</TableHead>
                     <TableHead className="w-40"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {documents.map((doc) => (
+                  {visibleDocuments.map((doc) => (
                     <TableRow key={doc.id}>
                       <TableCell>
                         <div className="flex items-center gap-2">
@@ -618,6 +649,19 @@ export function DocumentsPage() {
                       </TableCell>
                       <TableCell>
                         <SignOffBadge state={doc.sign_off_state} />
+                      </TableCell>
+                      <TableCell>
+                        {(linksByDocument.get(doc.id) ?? []).length ? (
+                          <div className="flex flex-wrap gap-1">
+                            {(linksByDocument.get(doc.id) ?? []).map((l) => (
+                              <Badge key={l.id} variant="outline" className="font-mono text-[10px]">
+                                {l.account_code}
+                              </Badge>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {doc.uploaded_by_username} · {formatDateTime(doc.uploaded_at)}

@@ -8,6 +8,7 @@ import { JournalEntriesPage } from '@/pages/JournalEntries'
 import { ReportsPage } from '@/pages/Reports'
 import { BudgetPage } from '@/pages/Budget'
 import { DocumentsPage } from '@/pages/Documents'
+import { LeadsheetsPage } from '@/pages/Leadsheets'
 import { ActivityPage } from '@/pages/Activity'
 import { AdminPage } from '@/pages/Admin'
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
@@ -46,6 +47,7 @@ export default function App() {
             <Route path="reports" element={<ReportsPage />} />
             <Route path="budget" element={<BudgetPage />} />
             <Route path="documents" element={<DocumentsPage />} />
+            <Route path="leadsheets" element={<LeadsheetsPage />} />
             <Route path="activity" element={<ActivityPage />} />
             <Route
               path="admin"

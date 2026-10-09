@@ -475,3 +475,65 @@ export interface TcaRollForwardResult {
   prior_year: string | null
   warnings: string[]
 }
+
+// ── Leadsheets (working-papers leadsheet viewer, PLAN §4.3) ─────────────────
+
+/** One account row inside a leadsheet (GET /working-papers/leadsheets). */
+export interface LeadsheetAccount {
+  account_id: number
+  acct_fmtd: string
+  description: string | null
+  prior_year: string
+  unadjusted: string
+  aje: string
+  rje: string
+  final: string
+  change: string
+}
+
+export interface LeadsheetTotals {
+  prior_year: string
+  unadjusted: string
+  aje: string
+  rje: string
+  final: string
+  change: string
+}
+
+export interface LeadsheetGroup {
+  classification: string
+  accounts: LeadsheetAccount[]
+  totals: LeadsheetTotals
+}
+
+export interface LeadsheetsResponse {
+  fiscal_year: string | null
+  prior_fiscal_year: string | null
+  period_id: number
+  period_name: string
+  scheme_id: number | null
+  leadsheets: LeadsheetGroup[]
+}
+
+/** A document attached to a leadsheet account code (document_account_links). */
+export interface AccountLink {
+  id: number
+  working_paper_id: number
+  account_code: string
+  fiscal_year_id: number
+  created_by_user_id: number
+  created_by_username: string | null
+  created_at: string
+  document_display_name: string | null
+  document_folder_path: string | null
+}
+
+/** Response of POST /fiscal-years/{id}/reopen. */
+export interface FiscalYearReopenResult {
+  fiscal_year_id: number
+  label: string
+  status: 'open' | 'closed' | 'locked'
+  forced: boolean
+  periods_still_closed: number
+  closed_periods: Period[]
+}
