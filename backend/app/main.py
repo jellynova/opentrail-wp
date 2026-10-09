@@ -30,6 +30,7 @@ from app.api.v1 import (
     sofi,
     tca,
     events,
+    imports,
 )
 
 
@@ -153,6 +154,9 @@ app.include_router(events.router, prefix="/api/v1", tags=["events"])
 
 # Tangible capital asset schedule (PS 3150)
 app.include_router(tca.router, prefix="/api/v1", tags=["tca"])
+
+# Import preview (Caseware-style column mapping)
+app.include_router(imports.router, prefix="/api/v1", tags=["imports"])
 
 # Audit trail / activity log
 app.include_router(audit.router, prefix="/api/v1", tags=["audit"])

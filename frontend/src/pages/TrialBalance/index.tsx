@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   useReactTable,
   getCoreRowModel,
@@ -7,7 +8,7 @@ import {
   type ColumnDef,
   type ColumnFiltersState,
 } from '@tanstack/react-table'
-import { Download, Upload, RefreshCw, Loader2 } from 'lucide-react'
+import { Download, Upload, RefreshCw } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { Button } from '@/components/ui/button'
@@ -24,8 +25,9 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
-import { useTrialBalance, useImportFromCSV } from '@/hooks/useTrialBalance'
-import { apiErrorMessage, formatCurrency, netBalance } from '@/lib/utils'
+import { useTrialBalance } from '@/hooks/useTrialBalance'
+import { ImportMappingDialog, type CanonicalField } from '@/components/shared/ImportMappingDialog'
+import { formatCurrency, netBalance } from '@/lib/utils'
 import type { TrialBalanceEntry } from '@/types'
 import { toast } from '@/hooks/useToast'
 
@@ -38,7 +40,21 @@ function NetBalanceCell({ debit, credit }: { debit: string; credit: string }) {
   )
 }
 
+const TB_FIELDS: CanonicalField[] = [
+  { key: 'account_code', label: 'Account code', required: true },
+  { key: 'account_name', label: 'Account name' },
+  { key: 'debit', label: 'Period debit' },
+  { key: 'credit', label: 'Period credit' },
+  { key: 'amount', label: 'Amount (signed; debit positive)' },
+  { key: 'opening_debit', label: 'Opening debit' },
+  { key: 'opening_credit', label: 'Opening credit' },
+  { key: 'ytd_debit', label: 'YTD debit' },
+  { key: 'ytd_credit', label: 'YTD credit' },
+  { key: 'description', label: 'Description' },
+]
+
 export function TrialBalancePage() {
+  const queryClient = useQueryClient()
   const [selectedFYId, setSelectedFYId] = useState<number | null>(null)
   const [selectedPeriodId, setSelectedPeriodId] = useState<number | null>(null)
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -48,7 +64,6 @@ export function TrialBalancePage() {
   const { data: fiscalYears, isLoading: fyLoading } = useFiscalYears()
   const { data: periods, isLoading: periodsLoading } = usePeriods(selectedFYId)
   const { data: trialBalance, isLoading: tbLoading } = useTrialBalance(selectedPeriodId)
-  const importCSV = useImportFromCSV()
 
   const columns: ColumnDef<TrialBalanceEntry>[] = [
     {
@@ -179,9 +194,14 @@ export function TrialBalancePage() {
     }
   )
 
-  const handleCSVImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+
+  const handleFilePicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (!file || !selectedPeriodId || !selectedFYId) {
+    e.target.value = ''
+    if (!file) return
+    if (!selectedPeriodId || !selectedFYId) {
       toast({
         title: 'Select a fiscal year and period first',
         description: 'The import needs to know which year the accounts belong to.',
@@ -189,24 +209,8 @@ export function TrialBalancePage() {
       })
       return
     }
-    importCSV.mutate(
-      { period_id: selectedPeriodId, fiscal_year_id: selectedFYId, file },
-      {
-        onSuccess: (data) => {
-          toast({
-            title: 'Import complete',
-            description: `${data.records_imported} new, ${data.records_updated} updated${
-              data.errors.length ? `, ${data.errors.length} row error(s)` : ''
-            }.`,
-          })
-        },
-        onError: (err) => {
-          toast({ title: 'Import failed', description: apiErrorMessage(err), variant: 'destructive' })
-        },
-      }
-    )
-    // Reset input
-    if (fileInputRef.current) fileInputRef.current.value = ''
+    setImportFile(file)
+    setMappingOpen(true)
   }
 
   return (
@@ -220,21 +224,17 @@ export function TrialBalancePage() {
               variant="outline"
               size="sm"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!selectedPeriodId || importCSV.isPending}
+              disabled={!selectedPeriodId}
             >
-              {importCSV.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Upload className="mr-2 h-4 w-4" />
-              )}
-              Import CSV
+              <Upload className="mr-2 h-4 w-4" />
+              Import file
             </Button>
             <input
               ref={fileInputRef}
               type="file"
-              accept=".csv"
+              accept=".csv,.xlsx,.xls,.txt,.iif"
               className="hidden"
-              onChange={handleCSVImport}
+              onChange={handleFilePicked}
             />
             <Button variant="outline" size="sm" disabled={!trialBalance?.length}>
               <Download className="mr-2 h-4 w-4" />
@@ -374,6 +374,29 @@ export function TrialBalancePage() {
           </div>
         </div>
       )}
+
+      <ImportMappingDialog
+        open={mappingOpen}
+        onOpenChange={(open) => { if (!open) { setMappingOpen(false); setImportFile(null) } }}
+        importKind="trial-balance"
+        fields={TB_FIELDS}
+        file={importFile}
+        fiscalYearId={selectedFYId}
+        importParams={{ period_id: selectedPeriodId ?? undefined, fiscal_year_id: selectedFYId ?? undefined }}
+        importPath="/v1/trial-balance/import/csv"
+        title="Import trial balance"
+        onImportSuccess={() => void queryClient?.invalidateQueries({ queryKey: ['trial-balance', selectedPeriodId] })}
+        onImported={(data) => {
+          const result = data as { records_imported?: number; records_updated?: number; errors?: string[] }
+          toast({
+            title: 'Import complete',
+            description:
+              `${result.records_imported ?? 0} new, ${result.records_updated ?? 0} updated` +
+              `${result.errors?.length ? `, ${result.errors.length} row error(s)` : ''}.`,
+            variant: result.errors?.length ? 'destructive' : undefined,
+          })
+        }}
+      />
     </div>
   )
 }

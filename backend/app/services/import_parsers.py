@@ -351,6 +351,210 @@ def normalise_to_csv(content: bytes, filename: str = "", sheet: Optional[str] = 
 # Canonical column mapping (trial balance auto-detection)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Explicit column mapping (Caseware-style import dialog)
+# ---------------------------------------------------------------------------
+
+class ImportMappingError(ImportParseError):
+    """
+    A user-supplied column map is unusable: it is missing required canonical
+    fields, refers to columns beyond the edge of the file, or maps one canonical
+    field twice. Carries the offending field names for a precise 422 response.
+    """
+
+    def __init__(self, message: str, missing: Optional[Sequence[str]] = None):
+        super().__init__(message)
+        self.missing = list(missing or [])
+
+
+def column_index(spec: Any) -> int:
+    """
+    Normalise a column reference to a 0-based index.
+
+    Accepts an int (0-based), a numeric string ("3"), or Excel-style letters
+    ("A" = 0, "B" = 1, … "AA" = 26) so a spreadsheet-savvy user can use either.
+    """
+    if isinstance(spec, bool) or not isinstance(spec, (int, str)):
+        raise ImportMappingError(f"invalid column reference {spec!r}: use a 0-based index or a column letter")
+    if isinstance(spec, int):
+        index = spec
+    else:
+        text = str(spec).strip()
+        if text.isdigit():
+            index = int(text)
+        elif text.isalpha() and len(text) <= 3:
+            index = 0
+            for ch in text.upper():
+                index = index * 26 + (ord(ch) - ord("A") + 1)
+            index -= 1
+        else:
+            raise ImportMappingError(
+                f"invalid column reference {spec!r}: use a 0-based index or a column letter (A, B, C, …)"
+            )
+    if index < 0:
+        raise ImportMappingError(f"column index {index} is negative; indexes are 0-based (or Excel letters)")
+    return index
+
+
+def load_grid(content: bytes, filename: str = "", sheet: Optional[str] = None
+              ) -> Tuple[str, List[List[str]]]:
+    """
+    Parse any supported upload into a raw grid of string cells (format, grid).
+
+    Unlike load_rows() no header is assumed: the caller decides which row (if
+    any) names the columns. Blank rows are dropped; IIF files become a grid
+    whose first row is the !TRNS field names.
+    """
+    if not content:
+        raise ImportParseError("the file is empty")
+    kind = sniff_format(filename, content)
+    if kind == "xls":
+        raise ImportParseError("legacy .xls files are not supported; save as .xlsx or CSV")
+
+    if kind == "iif":
+        fieldnames, rows = _load_iif(decode(content))
+        grid = [list(fieldnames)] + [[row.get(name, "") for name in fieldnames] for row in rows]
+        grid = [row for row in grid if any(cell.strip() for cell in row)]
+        if not grid:
+            raise ImportParseError("the file has no data rows")
+        return kind, grid
+
+    if kind == "xlsx":
+        grid = _grid_from_xlsx(content, sheet)
+    elif kind == "html":
+        grid = _grid_from_html(content)
+    else:
+        text = decode(content)
+        if kind == "tsv":
+            grid = _grid_from_delimited(text, "\t")
+        else:
+            grid = _grid_from_delimited(text, ",")
+
+    grid = [row for row in grid if any(cell.strip() for cell in row)]
+    if not grid:
+        raise ImportParseError("the file has no data rows")
+    return kind, grid
+
+
+def apply_column_map(grid: Sequence[Sequence[Any]], header_row: int, column_map: Dict[str, Any],
+                     required: Sequence[str] = ()) -> Tuple[List[str], List[Dict[str, str]]]:
+    """
+    Apply an explicit user column map to a raw grid.
+
+    column_map maps canonical field names to a column reference (0-based index,
+    numeric string or Excel letters — see column_index). Rows below ``header_row``
+    become dicts keyed by canonical field name. Validates that every required
+    canonical field is mapped, that no canonical field is mapped twice, and that
+    every index lands inside the file; raises ImportMappingError otherwise.
+    """
+    if not column_map:
+        raise ImportMappingError("column_map is empty")
+    if header_row < 0 or header_row >= len(grid):
+        raise ImportMappingError(
+            f"header row {header_row} is not in the file (1-based row "
+            f"{header_row + 1 if header_row >= 0 else 1}; the file has {len(grid)} non-empty rows)"
+        )
+
+    width = max((len(row) for row in grid), default=0)
+    resolved: Dict[str, int] = {}
+    for field, spec in column_map.items():
+        index = column_index(spec)
+        if field in resolved:
+            raise ImportMappingError(f"canonical field '{field}' is mapped more than once")
+        if index >= width:
+            raise ImportMappingError(
+                f"column {spec} (mapped to '{field}') is out of range: the widest row has {width} column(s)"
+            )
+        resolved[field] = index
+
+    missing = [field for field in required if field not in resolved]
+    if missing:
+        raise ImportMappingError(
+            "column_map is missing required field(s): " + ", ".join(missing)
+            + f" — map each one to a column or provide all of: {', '.join(required)}",
+            missing=missing,
+        )
+
+    fieldnames = list(column_map.keys())
+    rows: List[Dict[str, str]] = []
+    for grid_row in grid[header_row + 1:]:
+        row = {field: (grid_row[idx].strip() if idx < len(grid_row) else "")
+               for field, idx in resolved.items()}
+        if any(row.values()):
+            rows.append(row)
+    return fieldnames, rows
+
+
+def mapped_rows(content: bytes, filename: str, column_map: Dict[str, Any], header_row: Optional[int] = None,
+                sheet: Optional[str] = None, required: Sequence[str] = ()
+                ) -> Tuple[List[str], List[Dict[str, str]], int]:
+    """
+    Explicitly-mapped counterpart of load_rows(): returns (canonical_fieldnames,
+    rows, header_row_used). The column map alone decides what each column means —
+    header auto-detection is only used to find where data starts when the caller
+    did not specify a header row.
+    """
+    _, grid = load_grid(content, filename, sheet)
+    if header_row is None:
+        header_row = find_header_row(grid)
+    fieldnames, rows = apply_column_map(grid, header_row, column_map, required=required)
+    return fieldnames, rows, header_row
+
+
+def list_sheets(content: bytes, filename: str = "") -> List[str]:
+    """Sheet names of an Excel workbook upload; empty for every other format."""
+    if sniff_format(filename, content) != "xlsx":
+        return []
+    try:
+        import openpyxl
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+    except Exception:
+        return []
+    try:
+        return list(workbook.sheetnames)
+    finally:
+        workbook.close()
+
+
+# Canonical fields the preview endpoint guesses, with the header-word variants
+# each one is recognised by (compared like _find_column: case-insensitive).
+PREVIEW_COLUMN_GUESSES: Dict[str, Tuple[str, ...]] = {
+    "account_code": ("account code", "account number", "account no", "acct no", "acct_fmtd",
+                     "g/l account", "gl account", "g/l", "acct", "account", "accnt"),
+    "account_name": ("account name", "name", "account description", "full name"),
+    "debit": DEBIT_VARIANTS,
+    "credit": CREDIT_VARIANTS,
+    "amount": AMOUNT_VARIANTS,
+    "balance": ("balance", "closing balance", "ending balance", "net balance"),
+    "period": ("period", "fiscal period", "fisc_prd"),
+    "description": ("description", "memo", "notes", "details"),
+    "asset_class": ("asset class", "class", "asset category", "category"),
+    "cost_opening": ("cost opening", "opening cost", "cost - opening"),
+    "cost_additions": ("additions", "cost additions", "acquisitions"),
+    "cost_disposals": ("disposals", "cost disposals", "retirements"),
+    "amort_opening": ("accumulated amortization opening", "amortization opening", "amort opening"),
+    "amort_expense": ("amortization", "amortization expense", "amort expense"),
+    "amort_disposals": ("amortization disposals", "accumulated amortization disposals", "amort disposals"),
+    "expenses": ("expenses", "expense"),
+    "position": ("position", "title", "office"),
+    "is_elected_official": ("elected", "elected official", "is_elected_official"),
+}
+
+
+def guess_columns(fieldnames: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Best-effort canonical-field guesses for the mapping UI: for every canonical
+    field whose variants match a header, {index, header} under its name.
+    """
+    guesses: Dict[str, Dict[str, Any]] = {}
+    lowered = {name.strip().lower(): index for index, name in enumerate(fieldnames)}
+    for field, variants in PREVIEW_COLUMN_GUESSES.items():
+        found = _find_column(fieldnames, variants)
+        if found is not None:
+            guesses[field] = {"index": lowered[found.strip().lower()], "header": found}
+    return guesses
+
+
 def to_csv_bytes(fieldnames: Sequence[str], rows: List[Dict[str, str]]) -> bytes:
     """Serialise normalised rows back to CSV bytes for the existing importers."""
     buffer = io.StringIO()

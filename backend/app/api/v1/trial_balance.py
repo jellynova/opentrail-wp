@@ -1,10 +1,12 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile, File, status
 from sqlalchemy import select, and_
 from sqlalchemy.orm import Session
 
+from app.api.v1.imports import column_map_or_422 as _column_map_or_422
+from app.api.v1.imports import mapping_error_422 as _mapping_error_422
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.trial_balance import TrialBalanceEntry
@@ -65,27 +67,62 @@ async def import_csv(
     ytd_debit_col: str = Query("YTD Debit", description="CSV column name for YTD debit"),
     ytd_credit_col: str = Query("YTD Credit", description="CSV column name for YTD credit"),
     sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
+    header_row: Optional[int] = Query(None, ge=0, description="Explicit header row (0-based index into the non-empty rows); auto-detected when omitted"),
+    column_map: Optional[str] = Form(None, description='Explicit column mapping as JSON, e.g. {"account_code": 0, "debit": 2, "credit": 3}; column refs may be 0-based indexes or Excel letters'),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
-    """Import trial balance from a CSV, Excel, QuickBooks or Sage export."""
-    column_mapping = {
-        acct_fmtd_col: "acct_fmtd",
-        period_debit_col: "period_debit",
-        period_credit_col: "period_credit",
-        opening_debit_col: "opening_debit",
-        opening_credit_col: "opening_credit",
-        ytd_debit_col: "ytd_debit",
-        ytd_credit_col: "ytd_credit",
-    }
+    """
+    Import trial balance from a CSV, Excel, QuickBooks or Sage export.
+
+    With a ``column_map`` the upload is read exactly as mapped (no header
+    auto-detection): canonical fields are account_code (required) plus debit,
+    credit, opening_debit, opening_credit, ytd_debit, ytd_credit. A single
+    signed amount/balance column may stand in for debit+credit.
+    """
+    mapping = _column_map_or_422(column_map)
 
     ensure_period_editable(db, period_id)
     content = await file.read()
+    if mapping is not None:
+        # Explicit user mapping wins: the file is read exactly as mapped.
+        field_map = {"account_code": "acct_fmtd", "debit": "period_debit", "credit": "period_credit",
+                     "opening_debit": "opening_debit", "opening_credit": "opening_credit",
+                     "ytd_debit": "ytd_debit", "ytd_credit": "ytd_credit"}
+        try:
+            fieldnames, rows, _used = import_parsers.mapped_rows(
+                content, file.filename or "", mapping, header_row=header_row, sheet=sheet,
+                required=("account_code",),
+            )
+        except import_parsers.ImportMappingError as exc:
+            raise _mapping_error_422(exc)
+        except import_parsers.ImportParseError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        has_debit_credit = any(f in fieldnames for f in ("debit", "credit"))
+        csv_rows: List[Dict[str, str]] = []
+        for row in rows:
+            out: Dict[str, str] = {"Account": row.get("account_code", "")}
+            if has_debit_credit:
+                out["Debit"], out["Credit"] = row.get("debit", ""), row.get("credit", "")
+            else:
+                signed = import_parsers.parse_amount(row.get("amount", ""))
+                out["Debit"] = str(signed) if signed > 0 else ""
+                out["Credit"] = str(-signed) if signed < 0 else ""
+            out["Opening Debit"] = row.get("opening_debit", "")
+            out["Opening Credit"] = row.get("opening_credit", "")
+            out["YTD Debit"] = row.get("ytd_debit", "")
+            out["YTD Credit"] = row.get("ytd_credit", "")
+            csv_rows.append(out)
+        column_mapping = {"Account": "acct_fmtd", "Debit": "period_debit", "Credit": "period_credit",
+                          "Opening Debit": "opening_debit", "Opening Credit": "opening_credit",
+                          "YTD Debit": "ytd_debit", "YTD Credit": "ytd_credit"}
+        content = import_parsers.to_csv_bytes(["Account", "Debit", "Credit", "Opening Debit",
+                                               "Opening Credit", "YTD Debit", "YTD Credit"], csv_rows)
     # CSV keeps the historical exact behaviour; everything else (xlsx, tab-delimited,
     # IIF, HTML report exports, Sage variants) is normalised by the shared parser and
     # mapped onto the canonical Account/Debit/Credit columns the service expects.
-    if import_parsers.sniff_format(file.filename or "", content) != "csv":
+    elif import_parsers.sniff_format(file.filename or "", content) != "csv":
         try:
             fieldnames, rows = import_parsers.load_rows(content, file.filename or "", sheet)
             tb_mapping, rows = import_parsers.canonicalize_tb_rows(fieldnames, rows)
@@ -93,6 +130,16 @@ async def import_csv(
             content = import_parsers.to_csv_bytes(["Account", "Debit", "Credit"], rows)
         except import_parsers.ImportParseError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    else:
+        column_mapping = {
+            acct_fmtd_col: "acct_fmtd",
+            period_debit_col: "period_debit",
+            period_credit_col: "period_credit",
+            opening_debit_col: "opening_debit",
+            opening_credit_col: "opening_credit",
+            ytd_debit_col: "ytd_debit",
+            ytd_credit_col: "ytd_credit",
+        }
     imported, updated, errors = tb_svc.import_from_csv(
         db=db,
         period_id=period_id,

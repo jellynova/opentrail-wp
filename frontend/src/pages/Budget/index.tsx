@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { ArrowLeft, Download, Loader2, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Download, Loader2, Plus, Trash2, Upload } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { Button } from '@/components/ui/button'
@@ -29,6 +30,7 @@ import {
 } from '@/hooks/useBudget'
 import { useAccounts } from '@/hooks/useAccounts'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
+import { ImportMappingDialog, type CanonicalField } from '@/components/shared/ImportMappingDialog'
 import { apiErrorMessage, formatAmount, formatCurrency, formatDate } from '@/lib/utils'
 import { downloadFile } from '@/lib/download'
 import { useAuthStore } from '@/store/auth'
@@ -74,6 +76,12 @@ const LIGHT: Record<TrafficLight, { dot: string; text: string; label: string }> 
   amber: { dot: 'bg-yellow-500', text: 'text-yellow-700', label: 'Monitor' },
   red: { dot: 'bg-red-500', text: 'text-red-700', label: 'Action required' },
 }
+
+const BUDGET_IMPORT_FIELDS: CanonicalField[] = [
+  { key: 'account_code', label: 'Account code', required: true },
+  { key: 'amount', label: 'Amount', required: true },
+  { key: 'description', label: 'Description' },
+]
 
 function StatusDot({ status }: { status: TrafficLight }) {
   return (
@@ -788,6 +796,9 @@ function YearControls({ budgetYear }: { budgetYear: BudgetYear }) {
   const { hasRole } = useAuthStore()
   const setStatus = useSetBudgetYearStatus()
   const consolidate = useConsolidateBudget()
+  const queryClient = useQueryClient()
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
   const idx = YEAR_FLOW.indexOf(budgetYear.status)
   const next = YEAR_FLOW[idx + 1]
   const prev = budgetYear.status !== 'adopted' ? YEAR_FLOW[idx - 1] : undefined
@@ -807,6 +818,24 @@ function YearControls({ budgetYear }: { budgetYear: BudgetYear }) {
             <Button size="sm" variant="ghost" disabled={setStatus.isPending} onClick={() => move(prev)}>
               Back to {STATUS_LABEL[prev].toLowerCase()}
             </Button>
+          )}
+          {budgetYear.status !== 'adopted' && (
+            <label className="inline-flex cursor-pointer items-center rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+              <Upload className="mr-2 h-4 w-4" /> Import lines
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls,.txt,.iif"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  e.target.value = ''
+                  if (file) {
+                    setImportFile(file)
+                    setMappingOpen(true)
+                  }
+                }}
+              />
+            </label>
           )}
           {(budgetYear.status === 'under_review' || budgetYear.status === 'approved') && (
             <Button
@@ -848,6 +877,31 @@ function YearControls({ budgetYear }: { budgetYear: BudgetYear }) {
         <Download className="mr-2 h-4 w-4" />
         Council report
       </Button>
+
+      <ImportMappingDialog
+        open={mappingOpen}
+        onOpenChange={(open) => { if (!open) { setMappingOpen(false); setImportFile(null) } }}
+        importKind="budget-lines"
+        fields={BUDGET_IMPORT_FIELDS}
+        file={importFile}
+        fiscalYearId={budgetYear.fiscal_year_id}
+        importParams={{ fiscal_year_id: budgetYear.fiscal_year_id }}
+        importPath={`/v1/budget-years/${budgetYear.id}/lines/import/csv`}
+        title={`Import budget lines — ${budgetYear.label}`}
+        onImportSuccess={() => {
+          for (const key of ['budget-years', 'budget-requests', 'budget-variance', 'budget-amendments']) {
+            void queryClient.invalidateQueries({ queryKey: [key] })
+          }
+        }}
+        onImported={(result) => {
+          const r = result as { lines?: number; errors?: string[] }
+          toast({
+            title: `Imported ${r.lines ?? 0} budget lines`,
+            description: r.errors?.length ? r.errors.slice(0, 3).join('; ') : undefined,
+            variant: r.errors?.length ? 'destructive' : undefined,
+          })
+        }}
+      />
     </div>
   )
 }

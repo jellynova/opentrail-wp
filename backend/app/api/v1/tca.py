@@ -9,10 +9,12 @@ JSON/Excel/PDF shape as every other schedule.
 from decimal import Decimal
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.v1.export_utils import ExportFormat, tabular_response
+from app.api.v1.imports import column_map_or_422 as _column_map_or_422
+from app.api.v1.imports import mapping_error_422 as _mapping_error_422
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.period import FiscalYear
@@ -112,14 +114,33 @@ async def import_tca_lines(
     request: Request,
     fiscal_year_id: int = Query(...),
     replace: bool = Query(True, description="Replace the schedule, or merge into it"),
-    file: UploadFile = File(...),
     sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
+    header_row: Optional[int] = Query(None, ge=0, description="Explicit header row (0-based index into the non-empty rows); auto-detected when omitted"),
+    column_map: Optional[str] = Form(None, description='Explicit column mapping as JSON, e.g. {"asset_class": 0, "cost_opening": 1}; column refs may be 0-based indexes or Excel letters'),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(*WRITERS)),
 ):
-    """Import a continuity schedule from CSV, Excel or a QuickBooks/Sage export."""
+    """
+    Import a continuity schedule from CSV, Excel or a QuickBooks/Sage export.
+
+    With a ``column_map`` the upload is read exactly as mapped (no header
+    auto-detection): canonical fields are asset_class (required) plus
+    cost_opening, cost_additions, cost_disposals, amort_opening,
+    amort_expense, amort_disposals and notes.
+    """
     fy = _require_writable(db, fiscal_year_id)
-    imported, errors = tca_svc.import_csv(db, fiscal_year_id, await file.read(), replace=replace, sheet=sheet)
+    content = await file.read()
+    mapping = _column_map_or_422(column_map)
+    if mapping is not None:
+        try:
+            rows, errors = tca_svc.parse_csv(
+                content, sheet=sheet, header_row=header_row, column_map=mapping)
+        except import_parsers.ImportMappingError as exc:
+            raise _mapping_error_422(exc)
+    else:
+        rows, errors = tca_svc.parse_csv(content, sheet=sheet)
+    imported, errors = tca_svc.import_parsed(db, fiscal_year_id, rows, errors, replace=replace)
     if imported:
         audit_svc.record(
             db, user=current_user, action="import", resource_type="tca_schedule", resource_id=fiscal_year_id,

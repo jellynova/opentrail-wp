@@ -1,11 +1,13 @@
 from decimal import Decimal
 from typing import List, Literal, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.v1.export_utils import ExportFormat, tabular_response
+from app.api.v1.imports import column_map_or_422 as _column_map_or_422
+from app.api.v1.imports import mapping_error_422 as _mapping_error_422
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.period import FiscalYear
@@ -90,16 +92,33 @@ async def import_entries(
     schedule_type: ScheduleType = Query(...),
     replace: bool = Query(True, description="Replace existing entries of this type for the year"),
     sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
+    header_row: Optional[int] = Query(None, ge=0, description="Explicit header row (0-based index into the non-empty rows); auto-detected when omitted"),
+    column_map: Optional[str] = Form(None, description='Explicit column mapping as JSON, e.g. {"name": 0, "amount": 2}; column refs may be 0-based indexes or Excel letters'),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin", "finance_officer")),
 ):
-    """Import from CSV, Excel or a QuickBooks/Sage export (AP payment history, T4 summary, …)."""
+    """
+    Import from CSV, Excel or a QuickBooks/Sage export (AP payment history, T4 summary, …).
+
+    With a ``column_map`` the upload is read exactly as mapped (no header
+    auto-detection): canonical fields are name (required) plus amount, expenses,
+    position, description and is_elected_official.
+    """
     _require_fy(db, fiscal_year_id)
     content = await file.read()
-    sheet_param = file.filename and import_parsers.sniff_format(file.filename, content) == "xlsx"
-    imported, errors = sofi_svc.import_entries(
-        db, fiscal_year_id, schedule_type, content, replace, sheet=sheet if sheet_param else None)
+    mapping = _column_map_or_422(column_map)
+    is_xlsx = import_parsers.sniff_format(file.filename or "", content) == "xlsx"
+    if mapping is not None:
+        try:
+            rows, errors = sofi_svc.parse_csv(
+                content, sheet=sheet if is_xlsx else None, header_row=header_row, column_map=mapping)
+        except import_parsers.ImportMappingError as exc:
+            raise _mapping_error_422(exc)
+        imported = sofi_svc.save_entries(db, fiscal_year_id, schedule_type, rows, replace=replace)
+    else:
+        imported, errors = sofi_svc.import_entries(
+            db, fiscal_year_id, schedule_type, content, replace, sheet=sheet if is_xlsx else None)
     return {"records_imported": imported, "errors": errors}
 
 

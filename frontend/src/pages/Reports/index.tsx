@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Copy,
@@ -17,6 +18,7 @@ import {
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ReportView } from '@/components/shared/ReportView'
+import { ImportMappingDialog, type CanonicalField } from '@/components/shared/ImportMappingDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -31,7 +33,6 @@ import {
   useCloneReport,
   useDeleteReport,
   useGenerateReport,
-  useImportSofi,
   usePreviewReport,
   useReports,
   useRevertReport,
@@ -40,7 +41,7 @@ import {
   useValidateDefinition,
   type SofiScheduleType,
 } from '@/hooks/useReports'
-import { useImportTca, useRollForwardTca, useSaveTcaLines, useTcaLines, useTcaSchedule, type TcaLayout } from '@/hooks/useTca'
+import { useRollForwardTca, useSaveTcaLines, useTcaLines, useTcaSchedule, type TcaLayout } from '@/hooks/useTca'
 import { apiErrorMessage, cn, formatAmount } from '@/lib/utils'
 import { downloadFile } from '@/lib/download'
 import { useAuthStore } from '@/store/auth'
@@ -497,42 +498,44 @@ function WorkingPapersTab() {
 // ---------------------------------------------------------------------------
 
 const SOFI: { type: SofiScheduleType; name: string; hint: string }[] = [
-  { type: 'supplier_payment', name: 'Supplier payments', hint: 'CSV columns: Supplier (or Vendor Name), Amount' },
-  { type: 'employee_remuneration', name: 'Employee remuneration & expenses', hint: 'CSV columns: Employee, Position, Remuneration, Expenses, Elected (Y/N)' },
-  { type: 'guarantee_indemnity', name: 'Guarantees & indemnities', hint: 'CSV columns: Agreement, Amount, Description' },
+  { type: 'supplier_payment', name: 'Supplier payments', hint: 'Columns: Supplier (or Vendor Name), Amount — CSV, Excel, QuickBooks or Sage export' },
+  { type: 'employee_remuneration', name: 'Employee remuneration & expenses', hint: 'Columns: Employee, Position, Remuneration, Expenses, Elected (Y/N) — CSV, Excel, QuickBooks or Sage export' },
+  { type: 'guarantee_indemnity', name: 'Guarantees & indemnities', hint: 'Columns: Agreement, Amount, Description — CSV, Excel, QuickBooks or Sage export' },
+]
+
+const SOFI_FIELDS: CanonicalField[] = [
+  { key: 'name', label: 'Name (supplier / employee / agreement)', required: true },
+  { key: 'amount', label: 'Amount' },
+  { key: 'expenses', label: 'Expenses' },
+  { key: 'position', label: 'Position' },
+  { key: 'description', label: 'Description' },
+  { key: 'is_elected_official', label: 'Elected official (Y/N)' },
 ]
 
 function SofiSchedule({ type, hint, fiscalYearId }: { type: SofiScheduleType; hint: string; fiscalYearId: number }) {
   const { hasRole } = useAuthStore()
   const { data, isLoading } = useSofiSchedule(type, fiscalYearId)
-  const importMutation = useImportSofi()
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const queryClient = useQueryClient()
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         {hasRole(FINANCE) && (
           <label className="inline-flex cursor-pointer items-center rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
-            <Upload className="mr-2 h-4 w-4" /> Import CSV (replaces year)
+            <Upload className="mr-2 h-4 w-4" /> Import file (replaces year)
             <input
               type="file"
-              accept=".csv"
+              accept=".csv,.xlsx,.xls,.txt,.iif"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]
                 e.target.value = ''
-                if (!file) return
-                importMutation.mutate(
-                  { type, fiscalYearId, file },
-                  {
-                    onSuccess: (r) =>
-                      toast({
-                        title: `Imported ${r.records_imported} rows`,
-                        description: r.errors.length ? r.errors.slice(0, 3).join('; ') : undefined,
-                        variant: r.errors.length ? 'destructive' : undefined,
-                      }),
-                    onError: onError('Import failed'),
-                  }
-                )
+                if (file) {
+                  setImportFile(file)
+                  setMappingOpen(true)
+                }
               }}
             />
           </label>
@@ -555,6 +558,35 @@ function SofiSchedule({ type, hint, fiscalYearId }: { type: SofiScheduleType; hi
         ))}
       </div>
       {isLoading ? <LoadingSpinner fullPage /> : data && <ReportView report={data} />}
+
+      <ImportMappingDialog
+        open={mappingOpen}
+        onOpenChange={(open) => { if (!open) { setMappingOpen(false); setImportFile(null) } }}
+        importKind="sofi"
+        fields={SOFI_FIELDS}
+        file={importFile}
+        fiscalYearId={fiscalYearId}
+        importParams={{ fiscal_year_id: fiscalYearId, schedule_type: type, replace: true }}
+        importPath="/v1/sofi/entries/import"
+        title="Import SOFI schedule"
+        onImportSuccess={() => void queryClient.invalidateQueries({ queryKey: ['sofi'] })}
+        onImported={(result) => {
+          const r = result as { records_imported?: number; errors?: string[] }
+          if ((r.records_imported ?? 0) === 0) {
+            toast({
+              title: 'Could not read the file',
+              description: r.errors?.length ? r.errors.slice(0, 3).join('; ') : 'No rows were recognised — check the header row and mapping.',
+              variant: 'destructive',
+            })
+          } else {
+            toast({
+              title: `Imported ${r.records_imported} rows`,
+              description: r.errors?.length ? r.errors.slice(0, 3).join('; ') : undefined,
+              variant: r.errors?.length ? 'destructive' : undefined,
+            })
+          }
+        }}
+      />
     </div>
   )
 }
@@ -607,6 +639,17 @@ const TCA_FIELDS = [
   { key: 'amort_expense', label: 'Amortization' },
   { key: 'amort_disposals', label: 'Amort. disposals' },
 ] as const
+
+const TCA_MAPPING_FIELDS: CanonicalField[] = [
+  { key: 'asset_class', label: 'Asset class', required: true },
+  { key: 'cost_opening', label: 'Cost — opening' },
+  { key: 'cost_additions', label: 'Additions' },
+  { key: 'cost_disposals', label: 'Disposals' },
+  { key: 'amort_opening', label: 'Accum. amort. — opening' },
+  { key: 'amort_expense', label: 'Amortization' },
+  { key: 'amort_disposals', label: 'Amort. disposals' },
+  { key: 'notes', label: 'Notes' },
+]
 
 const EMPTY_TCA_LINE: TcaLineInput = {
   asset_class: '',
@@ -741,10 +784,12 @@ function TcaTab() {
   const [fy, setFy] = useState<number | null>(null)
   const [layout, setLayout] = useState<TcaLayout>('continuity')
   const [editing, setEditing] = useState(false)
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
   const { data: lines } = useTcaLines(fy)
   const { data: schedule, isLoading } = useTcaSchedule(fy, layout)
-  const importMutation = useImportTca(fy)
   const rollForward = useRollForwardTca(fy)
+  const queryClient = useQueryClient()
   const year = fiscalYears?.find((y) => y.id === fy)
   const readOnly = year?.status === 'locked'
   const rec = schedule?.reconciliation
@@ -782,27 +827,18 @@ function TcaTab() {
         {hasRole(FINANCE) && fy && !readOnly && (
           <>
             <label className="inline-flex cursor-pointer items-center rounded-md border px-3 py-2 text-sm hover:bg-muted">
-              <Upload className="mr-2 h-4 w-4" /> Import CSV (replaces year)
+              <Upload className="mr-2 h-4 w-4" /> Import file (replaces year)
               <input
                 type="file"
-                accept=".csv"
+                accept=".csv,.xlsx,.xls,.txt,.iif"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0]
                   e.target.value = ''
-                  if (!file) return
-                  importMutation.mutate(
-                    { file, replace: true },
-                    {
-                      onSuccess: (r) =>
-                        toast({
-                          title: `Imported ${r.records_imported} asset classes`,
-                          description: r.errors.length ? r.errors.slice(0, 3).join('; ') : undefined,
-                          variant: r.errors.length ? 'destructive' : undefined,
-                        }),
-                      onError: onError('Import failed'),
-                    }
-                  )
+                  if (file) {
+                    setImportFile(file)
+                    setMappingOpen(true)
+                  }
                 }}
               />
             </label>
@@ -908,6 +944,37 @@ function TcaTab() {
           </DialogContent>
         </Dialog>
       )}
+
+      <ImportMappingDialog
+        open={mappingOpen}
+        onOpenChange={(open) => { if (!open) { setMappingOpen(false); setImportFile(null) } }}
+        importKind="tca"
+        fields={TCA_MAPPING_FIELDS}
+        file={importFile}
+        fiscalYearId={fy}
+        importParams={{ fiscal_year_id: fy ?? undefined, replace: true }}
+        importPath="/v1/tca/lines/import"
+        title="Import tangible capital asset schedule"
+        onImportSuccess={() => {
+          void queryClient.invalidateQueries({ queryKey: ['tca', fy] })
+        }}
+        onImported={(result) => {
+          const r = result as { records_imported?: number; errors?: string[] }
+          if ((r.records_imported ?? 0) === 0) {
+            toast({
+              title: 'Could not read the file',
+              description: r.errors?.length ? r.errors.slice(0, 3).join('; ') : 'No asset classes were recognised — check the header row and mapping.',
+              variant: 'destructive',
+            })
+          } else {
+            toast({
+              title: `Imported ${r.records_imported} asset classes`,
+              description: r.errors?.length ? r.errors.slice(0, 3).join('; ') : undefined,
+              variant: r.errors?.length ? 'destructive' : undefined,
+            })
+          }
+        }}
+      />
     </div>
   )
 }

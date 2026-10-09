@@ -49,8 +49,45 @@ def _dec(value: Any) -> Decimal:
     return Decimal(s) if s else ZERO
 
 
-def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Parse a CSV export into entry dicts. Returns (rows, errors)."""
+def parse_csv(content: bytes, sheet: Optional[str] = None, header_row: Optional[int] = None,
+              column_map: Optional[Dict[str, Any]] = None
+              ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Parse a CSV export into entry dicts. Returns (rows, errors).
+
+    With ``column_map`` (explicit user mapping from the import dialog) the file is
+    read exactly as mapped — no header auto-detection and no alias matching.
+    Without one the historical alias auto-detection applies.
+    """
+    if column_map is not None:
+        try:
+            _, mapped, _used = import_parsers.mapped_rows(
+                content, "", column_map, header_row=header_row, sheet=sheet, required=("name",))
+        except import_parsers.ImportMappingError:
+            raise
+        except import_parsers.ImportParseError as exc:
+            return [], [str(exc)]
+        rows, errors = [], []
+        for line_no, row in enumerate(mapped, start=2):
+            name = (row.get("name") or "").strip()
+            if not name:
+                errors.append(f"Row {line_no}: missing name")
+                continue
+            try:
+                rows.append({
+                    "name": name,
+                    "amount": _dec(row.get("amount")) if "amount" in row else ZERO,
+                    "expenses": _dec(row.get("expenses")) if "expenses" in row else ZERO,
+                    "position": (row.get("position") or "").strip() or None if "position" in row else None,
+                    "description": (row.get("description") or "").strip() or None if "description" in row else None,
+                    "is_elected_official": str(row.get("is_elected_official") or "").strip().lower()
+                    in ("1", "y", "yes", "true", "x") if "is_elected_official" in row else False,
+                })
+            except InvalidOperation:
+                errors.append(f"Row {line_no}: invalid amount")
+                continue
+        return rows, errors
+
     # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
     # normalised by the shared parser into the same shape before alias mapping.
     if import_parsers.sniff_format("", content) != "csv":
@@ -90,6 +127,13 @@ def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[st
 def import_entries(db: Session, fiscal_year_id: int, schedule_type: str, content: bytes,
                    replace: bool = True, sheet: Optional[str] = None) -> Tuple[int, List[str]]:
     rows, errors = parse_csv(content, sheet=sheet)
+    imported = save_entries(db, fiscal_year_id, schedule_type, rows, replace=replace)
+    return imported, errors
+
+
+def save_entries(db: Session, fiscal_year_id: int, schedule_type: str,
+                 rows: List[Dict[str, Any]], replace: bool = True) -> int:
+    """Persist parsed SOFI entries; returns the row count (shared by both import paths)."""
     if replace and rows:
         for e in db.scalars(select(SofiEntry).where(
             SofiEntry.fiscal_year_id == fiscal_year_id, SofiEntry.schedule_type == schedule_type
@@ -98,7 +142,7 @@ def import_entries(db: Session, fiscal_year_id: int, schedule_type: str, content
     for r in rows:
         db.add(SofiEntry(fiscal_year_id=fiscal_year_id, schedule_type=schedule_type, source="csv", **r))
     db.commit()
-    return len(rows), errors
+    return len(rows)
 
 
 def _entries(db: Session, fiscal_year_id: int, schedule_type: str) -> List[SofiEntry]:

@@ -140,8 +140,41 @@ def replace_lines(db: Session, budget_year: BudgetYear, totals: Dict[int, Decima
 
 
 def lines_from_csv(db: Session, budget_year: BudgetYear, content: bytes,
-                   sheet: Optional[str] = None) -> Tuple[Dict[int, Decimal], List[str]]:
-    """CSV with Account and Amount columns (case-insensitive). Amounts summed per account."""
+                   sheet: Optional[str] = None, header_row: Optional[int] = None,
+                   column_map: Optional[Dict[str, Any]] = None) -> Tuple[Dict[int, Decimal], List[str]]:
+    """
+    CSV with Account and Amount columns (case-insensitive). Amounts summed per account.
+
+    With ``column_map`` (explicit user mapping from the import dialog) the file is
+    read exactly as mapped — canonical fields account_code (required), amount,
+    description — with no header auto-detection. Without one the historical
+    auto-detection applies.
+    """
+    if column_map is not None:
+        try:
+            _, mapped, _used = import_parsers.mapped_rows(
+                content, "", column_map, header_row=header_row, sheet=sheet,
+                required=("account_code", "amount"))
+        except import_parsers.ImportMappingError:
+            raise  # surfaced as a 422 naming the missing/mis-mapped fields
+        except import_parsers.ImportParseError as exc:
+            return {}, [str(exc)]
+        by_code = accounts_by_code(db, budget_year.fiscal_year_id)
+        totals: Dict[int, Decimal] = {}
+        errors: List[str] = []
+        for line_no, row in enumerate(mapped, start=2):
+            code = (row.get("account_code") or "").strip()
+            acct = by_code.get(code)
+            if acct is None:
+                errors.append(f"Row {line_no}: account '{code}' not found")
+                continue
+            try:
+                amount = import_parsers.parse_amount(row.get("amount"))
+            except Exception:
+                errors.append(f"Row {line_no}: invalid amount")
+                continue
+            totals[acct.id] = totals.get(acct.id, ZERO) + amount
+        return totals, errors
     # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
     # normalised by the shared parser into the same shape first.
     if import_parsers.sniff_format("", content) != "csv":

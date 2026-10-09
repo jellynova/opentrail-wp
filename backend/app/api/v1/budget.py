@@ -1,11 +1,13 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Literal, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.export_utils import ExportFormat, money_json, tabular_response
+from app.api.v1.imports import column_map_or_422 as _column_map_or_422
+from app.api.v1.imports import mapping_error_422 as _mapping_error_422
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.account import Account
@@ -30,6 +32,7 @@ from app.schemas.budget import (
 )
 from app.services import audit as audit_svc
 from app.services import budget_service as bsvc
+from app.services import import_parsers
 from app.services import locking
 
 router = APIRouter()
@@ -560,13 +563,29 @@ async def import_budget_lines_csv(
     budget_year_id: int,
     file: UploadFile = File(...),
     sheet: Optional[str] = Query(None, description="Excel sheet name (default: first non-empty sheet)"),
+    header_row: Optional[int] = Query(None, ge=0, description="Explicit header row (0-based index into the non-empty rows); auto-detected when omitted"),
+    column_map: Optional[str] = Form(None, description='Explicit column mapping as JSON, e.g. {"account_code": 0, "amount": 1}; column refs may be 0-based indexes or Excel letters'),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("finance_admin")),
 ):
-    """Replace budget lines from a CSV/Excel export with Account and Amount columns."""
+    """
+    Replace budget lines from a CSV/Excel export with Account and Amount columns.
+
+    With a ``column_map`` the upload is read exactly as mapped (no header
+    auto-detection): canonical fields are account_code and amount (both required).
+    """
     by = _budget_year_or_404(db, budget_year_id)
     _require_not_adopted(by)
-    totals, errors = bsvc.lines_from_csv(db, by, await file.read(), sheet=sheet)
+    mapping = _column_map_or_422(column_map)
+    content = await file.read()
+    if mapping is not None:
+        try:
+            totals, errors = bsvc.lines_from_csv(
+                db, by, content, sheet=sheet, header_row=header_row, column_map=mapping)
+        except import_parsers.ImportMappingError as exc:
+            raise _mapping_error_422(exc)
+    else:
+        totals, errors = bsvc.lines_from_csv(db, by, content, sheet=sheet)
     count = bsvc.replace_lines(db, by, totals) if totals else 0
     return {"lines": count, "errors": errors}
 

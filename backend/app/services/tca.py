@@ -54,8 +54,29 @@ def _dec(value: Any) -> Decimal:
     return Decimal(s) if s else ZERO
 
 
-def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Parse a TCA continuity spreadsheet export into line dicts. Returns (rows, errors)."""
+TCA_CANONICAL_FIELDS = ("asset_class", "cost_opening", "cost_additions", "cost_disposals",
+                        "amort_opening", "amort_expense", "amort_disposals", "notes")
+
+
+def parse_csv(content: bytes, sheet: Optional[str] = None, header_row: Optional[int] = None,
+              column_map: Optional[Dict[str, Any]] = None
+              ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Parse a TCA continuity spreadsheet export into line dicts. Returns (rows, errors).
+
+    With ``column_map`` (explicit user mapping from the import dialog) the file is
+    read exactly as mapped — no header auto-detection and no alias matching.
+    Without one the historical alias auto-detection applies.
+    """
+    if column_map is not None:
+        # Explicit mapping wins: parse the raw upload directly (no auto-detected
+        # normalisation step, which would assume a header row).
+        try:
+            return _parsed_from_mapped(content, header_row, column_map, sheet)
+        except import_parsers.ImportMappingError:
+            raise
+        except import_parsers.ImportParseError as exc:
+            return [], [str(exc)]
     # CSV keeps the historical behaviour; xlsx / tab-delimited / IIF / HTML exports are
     # normalised by the shared parser into the same shape before alias mapping.
     if import_parsers.sniff_format("", content) != "csv":
@@ -71,24 +92,78 @@ def parse_csv(content: bytes, sheet: Optional[str] = None) -> Tuple[List[Dict[st
     }
     if columns["asset_class"] is None:
         return [], [f"No asset class column found; expected one of: {', '.join(CSV_ALIASES['asset_class'])}"]
-
     rows, errors = [], []
-    for line_no, raw in enumerate(reader, start=2):
-        asset_class = (raw.get(columns["asset_class"]) or "").strip()
+    for line_no, raw_row in enumerate(reader, start=2):
+        asset_class = (raw_row.get(columns["asset_class"]) or "").strip()
         if not asset_class:
             errors.append(f"Row {line_no}: missing asset class")
             continue
         try:
-            row: Dict[str, Any] = {"asset_class": asset_class}
+            parsed: Dict[str, Any] = {"asset_class": asset_class}
             for field in ("cost_opening", "cost_additions", "cost_disposals",
                           "amort_opening", "amort_expense", "amort_disposals"):
-                row[field] = _dec(raw.get(columns[field])) if columns[field] else ZERO
-            row["notes"] = ((raw.get(columns["notes"]) or "").strip() or None) if columns["notes"] else None
+                parsed[field] = _dec(raw_row.get(columns[field])) if columns[field] else ZERO
+            parsed["notes"] = ((raw_row.get(columns["notes"]) or "").strip() or None) if columns["notes"] else None
         except InvalidOperation:
             errors.append(f"Row {line_no}: invalid amount")
             continue
-        rows.append(row)
+        rows.append(parsed)
     return rows, errors
+
+
+def _parsed_from_mapped(content: bytes, header_row: Optional[int], column_map: Dict[str, Any],
+                        sheet: Optional[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Parse with an explicit user column map (rows keyed by canonical field names)."""
+    _, mapped, _used = import_parsers.mapped_rows(
+        content, "", column_map, header_row=header_row, sheet=sheet, required=("asset_class",))
+
+    def raw(row: Dict[str, str], field: str) -> str:
+        return (row.get(field) or "").strip()
+
+    rows, errors = [], []
+    for line_no, row in enumerate(mapped, start=2):
+        asset_class = raw(row, "asset_class")
+        if not asset_class:
+            errors.append(f"Row {line_no}: missing asset class")
+            continue
+        try:
+            parsed: Dict[str, Any] = {"asset_class": asset_class}
+            for field in ("cost_opening", "cost_additions", "cost_disposals",
+                          "amort_opening", "amort_expense", "amort_disposals"):
+                parsed[field] = _dec(raw(row, field)) if field in row else ZERO
+            parsed["notes"] = raw(row, "notes") or None if "notes" in row else None
+        except InvalidOperation:
+            errors.append(f"Row {line_no}: invalid amount")
+            continue
+        rows.append(parsed)
+    return rows, errors
+
+
+def import_parsed(db: Session, fiscal_year_id: int, rows: List[Dict[str, Any]], errors: List[str],
+                  replace: bool = True) -> Tuple[int, List[str]]:
+    """Persist parsed TCA rows (shared by the auto-detect and explicit-mapping paths)."""
+    if not rows:
+        return 0, errors
+    if replace:
+        replace_lines(db, fiscal_year_id, rows, source="csv")
+        return len(rows), errors
+    # Append: merge by asset class, adding to whatever is already there
+    existing = {line.asset_class.strip().lower(): line for line in list_lines(db, fiscal_year_id)}
+    for row in rows:
+        line = existing.get(row["asset_class"].strip().lower())
+        if line is None:
+            line = TcaScheduleLine(fiscal_year_id=fiscal_year_id, asset_class=row["asset_class"], source="csv")
+            db.add(line)
+            existing[row["asset_class"].strip().lower()] = line
+        for field in ("cost_opening", "cost_additions", "cost_disposals",
+                      "amort_opening", "amort_expense", "amort_disposals"):
+            # A line added in this request has no column defaults applied yet, so read
+            # the value through _stored() rather than assuming it is a Decimal.
+            setattr(line, field, _stored(line, field) + row[field])
+        if row.get("notes"):
+            line.notes = row["notes"]
+    db.flush()
+    return len(rows), errors
 
 
 def _stored(line: TcaScheduleLine, field: str) -> Decimal:
@@ -131,28 +206,7 @@ def replace_lines(db: Session, fiscal_year_id: int, rows: List[Dict[str, Any]], 
 def import_csv(db: Session, fiscal_year_id: int, content: bytes, replace: bool = True,
                sheet: Optional[str] = None) -> Tuple[int, List[str]]:
     rows, errors = parse_csv(content, sheet=sheet)
-    if not rows:
-        return 0, errors
-    if replace:
-        replace_lines(db, fiscal_year_id, rows, source="csv")
-        return len(rows), errors
-    # Append: merge by asset class, adding to whatever is already there
-    existing = {line.asset_class.strip().lower(): line for line in list_lines(db, fiscal_year_id)}
-    for row in rows:
-        line = existing.get(row["asset_class"].strip().lower())
-        if line is None:
-            line = TcaScheduleLine(fiscal_year_id=fiscal_year_id, asset_class=row["asset_class"], source="csv")
-            db.add(line)
-            existing[row["asset_class"].strip().lower()] = line
-        for field in ("cost_opening", "cost_additions", "cost_disposals",
-                      "amort_opening", "amort_expense", "amort_disposals"):
-            # A line added in this request has no column defaults applied yet, so read
-            # the value through _stored() rather than assuming it is a Decimal.
-            setattr(line, field, _stored(line, field) + row[field])
-        if row.get("notes"):
-            line.notes = row["notes"]
-    db.flush()
-    return len(rows), errors
+    return import_parsed(db, fiscal_year_id, rows, errors, replace=replace)
 
 
 def previous_year(db: Session, fy: FiscalYear) -> Optional[FiscalYear]:
