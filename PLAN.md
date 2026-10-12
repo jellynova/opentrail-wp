@@ -985,6 +985,10 @@ code stands against it and the deviations worth knowing about._
 | Phase 7 — documents | Binder folders, versioning, review notes, two-level sign-off, period close, roll forward |
 | Phase 8 — collaboration | Optimistic locking, SSE notifications, audit trail with activity views |
 | §5.2 PS 3150 — TCA schedule | Continuity schedule by asset class, CSV import, manual entry, year-over-year carry-forward, reconciliation to the GL |
+| Post-Phase-8 — flexible import | XLSX and QuickBooks/Sage (IIF) exports accepted on every import endpoint, alongside CSV/TSV |
+| Post-Phase-8 — mapped import | Caseware-style user-mappable column importer: explicit `column_map` bypasses header/alias auto-detection, same persistence path either way |
+| Post-Phase-8 — leadsheets | Leadsheet viewer page with leadsheet-to-document account links |
+| Post-Phase-8 — fiscal-year reopen | `finance_admin`-only, audited, force-capable reopen of a locked fiscal year |
 
 ### Deviations
 
