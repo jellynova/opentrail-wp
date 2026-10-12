@@ -38,6 +38,28 @@ class DocumentWithLinksResponse(BaseModel):
     linked_account_codes: List[str] = []
 
 
+class RelatedDocumentCreate(BaseModel):
+    related_document_id: int
+    note: Optional[str] = None
+
+
+class RelatedDocumentResponse(BaseModel):
+    """A cross-link, reported from the requesting document's point of view."""
+
+    id: int
+    document_id: int
+    related_document_id: int
+    related_document_display_name: Optional[str] = None
+    related_document_folder_path: Optional[str] = None
+    related_document_file_type: Optional[str] = None
+    note: Optional[str] = None
+    created_by_user_id: int
+    created_by_username: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class FiscalYearReopenRequest(BaseModel):
     reason: str
     # Required to reopen a *locked* year; ordinary closed years need only a reason.

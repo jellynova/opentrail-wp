@@ -440,14 +440,15 @@ def update_document(
     return _detail(db, latest)
 
 
-def _content_disposition(name: str) -> str:
+def _content_disposition(name: str, *, inline: bool = False) -> str:
     """
-    RFC 6266 attachment header. Display names are user-supplied and often non-ASCII
+    RFC 6266 attachment/inline header. Display names are user-supplied and often non-ASCII
     (curly quotes, accents, em dashes), which Starlette cannot latin-1 encode raw, and a
     quote or CR/LF would corrupt the header; send an ASCII fallback plus filename*.
     """
+    disposition = "inline" if inline else "attachment"
     fallback = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name) or "download"
-    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+    return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
 @router.get("/documents/{document_id}/download")
@@ -472,6 +473,35 @@ def download_document(
         content=content,
         media_type=media_type,
         headers={"Content-Disposition": _content_disposition(wp.display_name)},
+    )
+
+
+@router.get("/documents/{document_id}/view")
+def view_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Same file content as /download, but with Content-Disposition: inline so a browser
+    renders it directly (PDF viewer, <img>, etc.) instead of forcing a download — the
+    "web based" leadsheet/document viewing the UI uses for pdf and img file types.
+    """
+    wp = _get_document_or_404(db, document_id)
+    try:
+        content = doc_mgr.get_file_bytes(wp)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found on disk. It may have been moved or deleted.",
+        )
+
+    media_type, _ = mimetypes.guess_type(wp.filename)
+    media_type = media_type or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": _content_disposition(wp.display_name, inline=True)},
     )
 
 

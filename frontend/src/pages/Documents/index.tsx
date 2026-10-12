@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   CheckCircle2,
   ChevronRight,
@@ -11,6 +11,7 @@ import {
   FolderOpen,
   History,
   Image as ImageIcon,
+  Link2,
   Loader2,
   MessageSquare,
   Pencil,
@@ -21,6 +22,8 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { DocumentPreviewDialog } from '@/components/shared/DocumentPreviewDialog'
+import { RelatedDocumentsDialog } from '@/components/shared/RelatedDocumentsDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -28,7 +31,6 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import api from '@/lib/api'
 import { downloadFile } from '@/lib/download'
 import { apiErrorMessage, formatDateTime, formatFileSize, formatRelativeTime } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
@@ -127,65 +129,6 @@ function FolderNodeView({
         </div>
       )}
     </div>
-  )
-}
-
-/** Inline PDF viewer. An <iframe src> can't send the Bearer token, so fetch the file
- * through the API client and show it from a blob URL. */
-function PdfPreview({ paper }: { paper: WorkingPaper }) {
-  const [url, setUrl] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let objectUrl: string | null = null
-    let cancelled = false
-    setUrl(null)
-    setError(null)
-    api
-      .get<Blob>(`/v1/documents/${paper.id}/download`, { responseType: 'blob' })
-      .then((r) => {
-        if (cancelled) return
-        objectUrl = URL.createObjectURL(new Blob([r.data], { type: 'application/pdf' }))
-        setUrl(objectUrl)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(apiErrorMessage(err))
-      })
-    return () => {
-      cancelled = true
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [paper.id])
-
-  if (error) return <p className="py-8 text-center text-sm text-destructive">Could not load preview: {error}</p>
-  if (!url) return <LoadingSpinner />
-  return <iframe src={url} className="w-full h-[70vh] rounded border" title={paper.display_name} />
-}
-
-function PreviewDialog({ paper, onClose }: { paper: WorkingPaper | null; onClose: () => void }) {
-  if (!paper) return null
-  return (
-    <Dialog open={!!paper} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-4xl max-h-[90vh]">
-        <DialogHeader>
-          <DialogTitle>{paper.display_name}</DialogTitle>
-        </DialogHeader>
-        {paper.file_type === 'pdf' ? (
-          <PdfPreview paper={paper} />
-        ) : (
-          <div className="flex flex-col items-center gap-4 py-8 text-muted-foreground">
-            <FileTypeIcon type={paper.file_type} />
-            <p className="text-sm">Preview not available for {paper.file_type} files.</p>
-            <Button
-              variant="outline"
-              onClick={() => void downloadFile(`/v1/documents/${paper.id}/download`, paper.display_name)}
-            >
-              <Download className="mr-2 h-4 w-4" /> Download
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -459,6 +402,7 @@ export function DocumentsPage() {
   const [uploadDescription, setUploadDescription] = useState('')
   const [previewPaper, setPreviewPaper] = useState<WorkingPaper | null>(null)
   const [reviewPaper, setReviewPaper] = useState<WorkingPaper | null>(null)
+  const [relatedPaper, setRelatedPaper] = useState<WorkingPaper | null>(null)
   const [editPaper, setEditPaper] = useState<WorkingPaper | null>(null)
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
@@ -671,11 +615,19 @@ export function DocumentsPage() {
                           <Button size="sm" variant="ghost" onClick={() => setReviewPaper(doc)} title="Review">
                             <MessageSquare className="h-4 w-4" />
                           </Button>
-                          {doc.file_type === 'pdf' && (
+                          {(doc.file_type === 'pdf' || doc.file_type === 'img') && (
                             <Button size="sm" variant="ghost" onClick={() => setPreviewPaper(doc)} title="Preview">
                               <Eye className="h-4 w-4" />
                             </Button>
                           )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            title="Related documents"
+                            onClick={() => setRelatedPaper(doc)}
+                          >
+                            <Link2 className="h-4 w-4" />
+                          </Button>
                           <Button
                             size="sm"
                             variant="ghost"
@@ -824,8 +776,13 @@ export function DocumentsPage() {
         </DialogContent>
       </Dialog>
 
-      <PreviewDialog paper={previewPaper} onClose={() => setPreviewPaper(null)} />
+      <DocumentPreviewDialog document={previewPaper} onClose={() => setPreviewPaper(null)} />
       <DocumentDialog document={reviewPaper} onClose={() => setReviewPaper(null)} />
+      <RelatedDocumentsDialog
+        document={relatedPaper}
+        allDocuments={documents ?? []}
+        onClose={() => setRelatedPaper(null)}
+      />
     </div>
   )
 }

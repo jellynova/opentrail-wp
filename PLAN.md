@@ -988,6 +988,8 @@ code stands against it and the deviations worth knowing about._
 | Post-Phase-8 — flexible import | XLSX and QuickBooks/Sage (IIF) exports accepted on every import endpoint, alongside CSV/TSV |
 | Post-Phase-8 — mapped import | Caseware-style user-mappable column importer: explicit `column_map` bypasses header/alias auto-detection, same persistence path either way |
 | Post-Phase-8 — leadsheets | Leadsheet viewer page with leadsheet-to-document account links |
+| Post-Phase-8 — web-based document viewing | `GET /documents/{id}/view` serves pdf/img files with `Content-Disposition: inline`; a shared `DocumentPreviewDialog` renders them in-browser (iframe/`<img>` from a blob URL) from both the Documents page and the Leadsheets document picker, instead of only offering a download |
+| Post-Phase-8 — document-to-document file linking | `document_cross_links` table + `/working-papers/{id}/related-documents` CRUD cross-references two working papers (e.g. an adjustment memo to the reconciliation it supports); symmetric, dedup'd either direction, reachable from both the Documents page and the Leadsheets document picker |
 | Post-Phase-8 — fiscal-year reopen | `finance_admin`-only, audited, force-capable reopen of a locked fiscal year |
 | Post-Phase-8 — multi-period trial balance import | A mapped "period" column (number, month name, or date) splits one uploaded file across several `Period` rows in one call; closed periods are skipped per-row, not a hard failure |
 | Post-Phase-8 — budget-from-trial-balance import | A mapped "budget" column alongside the TB import upserts matching `BudgetLine`s (summed per account across all rows, so a per-period share correctly reconstructs the annual figure), creating the fiscal year's budget year if none exists |

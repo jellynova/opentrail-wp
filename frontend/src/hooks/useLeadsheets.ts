@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
-import type { AccountLink, LeadsheetsResponse, MappingScheme, WorkingPaper } from '@/types'
+import type { AccountLink, LeadsheetsResponse, MappingScheme, RelatedDocument, WorkingPaper } from '@/types'
 
 export function useLeadsheets(periodId: number | null, scheme: string) {
   return useQuery({
@@ -103,5 +103,37 @@ export function useRemoveAccountLink() {
   return useLinkMutation<{ documentId: number; linkId: number }>(
     ({ documentId, linkId }) =>
       api.delete(`/v1/working-papers/${documentId}/account-links/${linkId}`)
+  )
+}
+
+// ── Document-to-document cross-references ("file linking") ─────────────────
+
+export function useRelatedDocuments(documentId: number | null) {
+  return useQuery({
+    queryKey: ['related-documents', documentId],
+    queryFn: () =>
+      api.get<RelatedDocument[]>(`/v1/working-papers/${documentId}/related-documents`).then((r) => r.data),
+    enabled: documentId !== null,
+  })
+}
+
+function useRelatedDocumentMutation<TVars>(fn: (vars: TVars) => Promise<unknown>) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['related-documents'] }),
+  })
+}
+
+export function useAddRelatedDocument() {
+  return useRelatedDocumentMutation<{ documentId: number; related_document_id: number; note?: string }>(
+    ({ documentId, ...body }) =>
+      api.post<RelatedDocument>(`/v1/working-papers/${documentId}/related-documents`, body).then((r) => r.data)
+  )
+}
+
+export function useRemoveRelatedDocument() {
+  return useRelatedDocumentMutation<{ documentId: number; linkId: number }>(
+    ({ documentId, linkId }) => api.delete(`/v1/working-papers/${documentId}/related-documents/${linkId}`)
   )
 }

@@ -269,3 +269,142 @@ def test_reopen_locked_year_requires_force(client, auth, fy2025, db, documents_d
 def test_reopen_fiscal_year_unknown_404(client, auth):
     r = client.post("/api/v1/fiscal-years/99999/reopen", json={"reason": "x"}, headers=auth("admin"))
     assert r.status_code == 404
+
+
+# ── Document-to-document cross-references ("file linking") ─────────────────
+
+
+def test_related_documents_add_list_remove(client, auth, fy2025, documents_dir):
+    d1 = _upload(client, auth, fy2025, display="adjustment memo.pdf").json()
+    d2 = _upload(client, auth, fy2025, display="bank reconciliation.pdf").json()
+
+    r = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"], "note": "supports the Q4 adjustment"},
+        headers=auth("officer"),
+    )
+    assert r.status_code == 201, r.text
+    link = r.json()
+    assert link["document_id"] == d1["id"]
+    assert link["related_document_id"] == d2["id"]
+    assert link["related_document_display_name"] == "bank reconciliation.pdf"
+    assert link["note"] == "supports the Q4 adjustment"
+    assert link["created_by_username"] == "officer"
+
+    # Visible from either side, each reporting the OTHER document.
+    from_d1 = client.get(f"/api/v1/working-papers/{d1['id']}/related-documents", headers=auth("viewer")).json()
+    assert len(from_d1) == 1 and from_d1[0]["related_document_id"] == d2["id"]
+    from_d2 = client.get(f"/api/v1/working-papers/{d2['id']}/related-documents", headers=auth("viewer")).json()
+    assert len(from_d2) == 1 and from_d2[0]["related_document_id"] == d1["id"]
+    assert from_d2[0]["id"] == link["id"]  # same underlying row
+
+    removed = client.delete(
+        f"/api/v1/working-papers/{d1['id']}/related-documents/{link['id']}", headers=auth("officer")
+    )
+    assert removed.status_code == 204
+    assert client.get(f"/api/v1/working-papers/{d2['id']}/related-documents", headers=auth("viewer")).json() == []
+
+
+def test_related_documents_rejects_self_link_and_duplicate(client, auth, fy2025, documents_dir):
+    d1 = _upload(client, auth, fy2025, display="one.pdf").json()
+    d2 = _upload(client, auth, fy2025, display="two.pdf").json()
+
+    self_link = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d1["id"]},
+        headers=auth("officer"),
+    )
+    assert self_link.status_code == 400
+
+    ok = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("officer"),
+    )
+    assert ok.status_code == 201
+
+    # Duplicate in either direction is rejected.
+    dup_same_order = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("admin"),
+    )
+    assert dup_same_order.status_code == 409
+    dup_reversed = client.post(
+        f"/api/v1/working-papers/{d2['id']}/related-documents",
+        json={"related_document_id": d1["id"]},
+        headers=auth("admin"),
+    )
+    assert dup_reversed.status_code == 409
+
+
+def test_related_documents_role_checks_and_404s(client, auth, fy2025, documents_dir):
+    d1 = _upload(client, auth, fy2025, display="one.pdf").json()
+    d2 = _upload(client, auth, fy2025, display="two.pdf").json()
+
+    forbidden = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("viewer"),
+    )
+    assert forbidden.status_code == 403
+
+    unknown_target = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": 99999},
+        headers=auth("officer"),
+    )
+    assert unknown_target.status_code == 404
+
+    unknown_source = client.post(
+        "/api/v1/working-papers/99999/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("officer"),
+    )
+    assert unknown_source.status_code == 404
+
+    link = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("officer"),
+    ).json()
+    remove_forbidden = client.delete(
+        f"/api/v1/working-papers/{d1['id']}/related-documents/{link['id']}", headers=auth("viewer")
+    )
+    assert remove_forbidden.status_code == 403
+
+    d3 = _upload(client, auth, fy2025, display="three.pdf").json()
+    wrong_document = client.delete(
+        f"/api/v1/working-papers/{d3['id']}/related-documents/{link['id']}", headers=auth("officer")
+    )
+    assert wrong_document.status_code == 404
+
+
+def test_related_documents_are_audited(client, auth, fy2025, documents_dir):
+    d1 = _upload(client, auth, fy2025, display="one.pdf").json()
+    d2 = _upload(client, auth, fy2025, display="two.pdf").json()
+    link = client.post(
+        f"/api/v1/working-papers/{d1['id']}/related-documents",
+        json={"related_document_id": d2["id"]},
+        headers=auth("officer"),
+    ).json()
+    client.delete(f"/api/v1/working-papers/{d1['id']}/related-documents/{link['id']}", headers=auth("officer"))
+
+    r = client.get(
+        "/api/v1/audit-logs", params={"resource_type": "document_cross_link"}, headers=auth("admin")
+    )
+    assert r.status_code == 200
+    actions = [e["action"] for e in r.json()["items"]]
+    assert "create" in actions and "delete" in actions
+
+
+# ── Inline document viewing ("web based" leadsheets/documents) ──────────────
+
+
+def test_view_document_is_inline_not_attachment(client, auth, fy2025, documents_dir):
+    doc = _upload(client, auth, fy2025).json()
+    r = client.get(f"/api/v1/documents/{doc['id']}/view", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.headers["content-disposition"].startswith("inline")
+    download = client.get(f"/api/v1/documents/{doc['id']}/download", headers=auth("viewer"))
+    assert download.headers["content-disposition"].startswith("attachment")

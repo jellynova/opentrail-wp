@@ -15,7 +15,7 @@ from app.models.mapping import MappingScheme, AccountClassification  # noqa: F40
 from app.models.trial_balance import TrialBalanceEntry  # noqa: F401
 from app.models.journal_entry import JournalEntry, JournalLine  # noqa: F401
 from app.models.document import WorkingPaper, WPAnnotation  # noqa: F401
-from app.models.document_links import DocumentAccountLink  # noqa: F401
+from app.models.document_links import DocumentAccountLink, DocumentCrossLink  # noqa: F401
 from app.models.budget import (  # noqa: F401
     BudgetYear, BudgetRequest, BudgetLine, BudgetAmendment, BudgetAmendmentLine,
 )
@@ -43,6 +43,7 @@ __all__ = [
     "WorkingPaper",
     "WPAnnotation",
     "DocumentAccountLink",
+    "DocumentCrossLink",
     "BudgetYear",
     "BudgetRequest",
     "BudgetLine",

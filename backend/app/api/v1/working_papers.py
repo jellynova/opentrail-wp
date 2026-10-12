@@ -7,10 +7,15 @@ from app.api.v1.export_utils import ExportFormat, money_json, tabular_response
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.document import WorkingPaper
-from app.models.document_links import DocumentAccountLink
+from app.models.document_links import DocumentAccountLink, DocumentCrossLink
 from app.models.period import FiscalYear
 from app.models.user import User
-from app.schemas.document_links import AccountLinkCreate, AccountLinkResponse
+from app.schemas.document_links import (
+    AccountLinkCreate,
+    AccountLinkResponse,
+    RelatedDocumentCreate,
+    RelatedDocumentResponse,
+)
 from app.services import audit as audit_svc
 from app.services import working_papers as wp
 
@@ -241,3 +246,131 @@ def links_by_account(
         stmt = stmt.where(DocumentAccountLink.fiscal_year_id == fiscal_year_id)
     links = db.scalars(stmt.order_by(DocumentAccountLink.created_at)).all()
     return [_link_response(db, link) for link in links]
+
+
+# ── Document-to-document cross-references ("file linking") ──────────────────
+
+
+def _cross_link_response(db: Session, link: DocumentCrossLink, from_document_id: int) -> RelatedDocumentResponse:
+    """Report the link from ``from_document_id``'s point of view, whichever side it's on."""
+    other_id = link.related_document_id if link.document_id == from_document_id else link.document_id
+    other = db.get(WorkingPaper, other_id)
+    username = db.scalars(select(User.username).where(User.id == link.created_by_user_id)).first()
+    return RelatedDocumentResponse(
+        id=link.id,
+        document_id=from_document_id,
+        related_document_id=other_id,
+        related_document_display_name=other.display_name if other else None,
+        related_document_folder_path=other.folder_path if other else None,
+        related_document_file_type=other.file_type if other else None,
+        note=link.note,
+        created_by_user_id=link.created_by_user_id,
+        created_by_username=username,
+        created_at=link.created_at,
+    )
+
+
+@router.post(
+    "/working-papers/{working_paper_id}/related-documents",
+    response_model=RelatedDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_related_document(
+    working_paper_id: int,
+    data: RelatedDocumentCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("finance_admin", "finance_officer")),
+):
+    """Cross-reference two documents so reviewers can jump between related evidence."""
+    paper = _get_paper_or_404(db, working_paper_id)
+    if data.related_document_id == working_paper_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A document cannot be linked to itself")
+    other = _get_paper_or_404(db, data.related_document_id)
+
+    existing = db.scalars(
+        select(DocumentCrossLink).where(
+            ((DocumentCrossLink.document_id == working_paper_id)
+             & (DocumentCrossLink.related_document_id == data.related_document_id))
+            | ((DocumentCrossLink.document_id == data.related_document_id)
+               & (DocumentCrossLink.related_document_id == working_paper_id))
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="These documents are already linked")
+
+    link = DocumentCrossLink(
+        document_id=working_paper_id,
+        related_document_id=data.related_document_id,
+        note=(data.note.strip() if data.note else None) or None,
+        created_by_user_id=current_user.id,
+    )
+    db.add(link)
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="document_cross_link",
+        resource_id=link.id,
+        new={"document_id": working_paper_id, "related_document_id": data.related_document_id},
+        summary=f"linked document {paper.display_name} to {other.display_name}",
+        request=request,
+        commit=True,
+    )
+    db.refresh(link)
+    return _cross_link_response(db, link, working_paper_id)
+
+
+@router.get(
+    "/working-papers/{working_paper_id}/related-documents",
+    response_model=List[RelatedDocumentResponse],
+)
+def list_related_documents(
+    working_paper_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Documents cross-linked to this one, either direction (any authenticated user)."""
+    _get_paper_or_404(db, working_paper_id)
+    links = db.scalars(
+        select(DocumentCrossLink).where(
+            (DocumentCrossLink.document_id == working_paper_id)
+            | (DocumentCrossLink.related_document_id == working_paper_id)
+        ).order_by(DocumentCrossLink.created_at)
+    ).all()
+    return [_cross_link_response(db, link, working_paper_id) for link in links]
+
+
+@router.delete(
+    "/working-papers/{working_paper_id}/related-documents/{link_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_related_document(
+    working_paper_id: int,
+    link_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("finance_admin", "finance_officer")),
+):
+    """Remove a cross-reference (officer and above)."""
+    _get_paper_or_404(db, working_paper_id)
+    link = db.get(DocumentCrossLink, link_id)
+    if link is None or working_paper_id not in (link.document_id, link.related_document_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document link not found")
+
+    other_id = link.related_document_id if link.document_id == working_paper_id else link.document_id
+    db.delete(link)
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="document_cross_link",
+        resource_id=link_id,
+        old={"document_id": link.document_id, "related_document_id": link.related_document_id},
+        summary=f"unlinked working paper #{working_paper_id} from #{other_id}",
+        request=request,
+        commit=True,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

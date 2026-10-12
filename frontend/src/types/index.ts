@@ -528,6 +528,20 @@ export interface AccountLink {
   document_folder_path: string | null
 }
 
+/** A cross-reference between two documents/leadsheets (document_cross_links). */
+export interface RelatedDocument {
+  id: number
+  document_id: number
+  related_document_id: number
+  related_document_display_name: string | null
+  related_document_folder_path: string | null
+  related_document_file_type: WorkingPaper['file_type'] | null
+  note: string | null
+  created_by_user_id: number
+  created_by_username: string | null
+  created_at: string
+}
+
 /** Response of POST /fiscal-years/{id}/reopen. */
 export interface FiscalYearReopenResult {
   fiscal_year_id: number

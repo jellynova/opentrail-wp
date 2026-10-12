@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Link2, Link2Off, Loader2, Search, Sheet } from 'lucide-react'
+import { Eye, Link2, Link2Off, Loader2, Search, Sheet } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { DocumentPreviewDialog } from '@/components/shared/DocumentPreviewDialog'
+import { RelatedDocumentsDialog } from '@/components/shared/RelatedDocumentsDialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -174,10 +176,14 @@ function LinkPickerDialog({
   accountCode,
   fiscalYearId,
   onClose,
+  onPreview,
+  onManageRelated,
 }: {
   accountCode: string | null
   fiscalYearId: number | null
   onClose: () => void
+  onPreview: (doc: WorkingPaper) => void
+  onManageRelated: (doc: WorkingPaper) => void
 }) {
   const canEdit = useAuthStore((s) => s.hasRole(['finance_admin', 'finance_officer']))
   const { data: documents } = useDocumentsForLinks(fiscalYearId)
@@ -231,41 +237,51 @@ function LinkPickerDialog({
                       {link?.created_by_username ? ` · linked by ${link.created_by_username}` : ''}
                     </p>
                   </div>
-                  {canEdit ? (
-                    link ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={removeLink.isPending}
-                        onClick={() => toggle(doc, link)}
-                      >
-                        {removeLink.isPending ? (
-                          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                        ) : (
-                          <Link2Off className="mr-1 h-3.5 w-3.5" />
-                        )}
-                        Detach
+                  <div className="flex items-center gap-1">
+                    {(doc.file_type === 'pdf' || doc.file_type === 'img') && (
+                      <Button size="sm" variant="ghost" onClick={() => onPreview(doc)} title="View">
+                        <Eye className="h-4 w-4" />
                       </Button>
+                    )}
+                    <Button size="sm" variant="ghost" onClick={() => onManageRelated(doc)} title="Related documents">
+                      <Link2 className="h-4 w-4" />
+                    </Button>
+                    {canEdit ? (
+                      link ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={removeLink.isPending}
+                          onClick={() => toggle(doc, link)}
+                        >
+                          {removeLink.isPending ? (
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          ) : (
+                            <Link2Off className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Detach
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={addLink.isPending || !fiscalYearId}
+                          onClick={() => toggle(doc)}
+                        >
+                          {addLink.isPending ? (
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          ) : (
+                            <Link2 className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          Attach
+                        </Button>
+                      )
+                    ) : link ? (
+                      <Badge variant="success">linked</Badge>
                     ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={addLink.isPending || !fiscalYearId}
-                        onClick={() => toggle(doc)}
-                      >
-                        {addLink.isPending ? (
-                          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                        ) : (
-                          <Link2 className="mr-1 h-3.5 w-3.5" />
-                        )}
-                        Attach
-                      </Button>
-                    )
-                  ) : link ? (
-                    <Badge variant="success">linked</Badge>
-                  ) : (
-                    <Badge variant="secondary">—</Badge>
-                  )}
+                      <Badge variant="secondary">—</Badge>
+                    )}
+                  </div>
                 </div>
               )
             })}
@@ -291,12 +307,15 @@ export function LeadsheetsPage() {
   const [scheme, setScheme] = useState('PSAB')
   const [selectedSheet, setSelectedSheet] = useState<string | null>(null)
   const [linkAccountCode, setLinkAccountCode] = useState<string | null>(null)
+  const [previewPaper, setPreviewPaper] = useState<WorkingPaper | null>(null)
+  const [relatedPaper, setRelatedPaper] = useState<WorkingPaper | null>(null)
 
   const { data: fiscalYears, isLoading: fyLoading } = useFiscalYears()
   const { data: periods, isLoading: periodsLoading } = usePeriods(selectedFYId)
   const { data: schemes } = useMappingSchemes()
   const { data: result, isLoading } = useLeadsheets(selectedPeriodId, scheme)
   const { data: allLinks } = useAllAccountLinks(selectedFYId)
+  const { data: allDocuments } = useDocumentsForLinks(selectedFYId)
 
   // account code -> number of linked documents, for the per-row indicators
   const linkedCounts = useMemo(() => {
@@ -457,6 +476,14 @@ export function LeadsheetsPage() {
         accountCode={linkAccountCode}
         fiscalYearId={selectedFYId}
         onClose={() => setLinkAccountCode(null)}
+        onPreview={setPreviewPaper}
+        onManageRelated={setRelatedPaper}
+      />
+      <DocumentPreviewDialog document={previewPaper} onClose={() => setPreviewPaper(null)} />
+      <RelatedDocumentsDialog
+        document={relatedPaper}
+        allDocuments={allDocuments ?? []}
+        onClose={() => setRelatedPaper(null)}
       />
     </div>
   )
