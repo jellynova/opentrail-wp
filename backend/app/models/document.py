@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Integer, Text
+from sqlalchemy import String, Boolean, DateTime, Float, ForeignKey, Integer, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -38,6 +38,25 @@ class WorkingPaper(Base):
         Integer, ForeignKey("working_papers.id"), nullable=True
     )
 
+    # Shared-drive storage (CaseWare-style: the organization's own network drive /
+    # SharePoint sync folder is the single canonical copy, not a byte copy inside
+    # OpenTrail). "managed" = OpenTrail's own documents volume (original behaviour,
+    # still used for anything uploaded before SHARED_DRIVE_PATH was configured).
+    storage_backend: Mapped[str] = mapped_column(String(20), nullable=False, default="managed")
+    # sha256 hex + mtime of the underlying file the last time OpenTrail confirmed it --
+    # lets a cheap stat-only check notice someone edited or moved the file directly on
+    # the shared drive (outside the app) without having to re-hash on every request.
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_mtime: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Set when a drift check finds the live file missing (deleted/moved externally);
+    # cleared the moment a new version or re-link restores it. Null = fine.
+    missing_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Where this version's PREVIOUS content was backed up (relative to SHARED_DRIVE_PATH)
+    # right before this version's bytes overwrote the canonical file in place -- only set
+    # for shared_drive documents past their first version. The backup lives on the same
+    # shared drive, not inside OpenTrail, so there is still exactly one filing system.
+    backup_path: Mapped[Optional[str]] = mapped_column(String(600), nullable=True)
+
     # Two-level sign-off (PLAN §7.2): preparer marks complete, reviewer approves.
     preparer_signed_off_by_user_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("users.id"), nullable=True
@@ -74,6 +93,14 @@ class WorkingPaper(Base):
     @property
     def is_reviewer_signed_off(self) -> bool:
         return self.reviewer_signed_off_at is not None
+
+    @property
+    def is_shared_drive(self) -> bool:
+        return self.storage_backend == "shared_drive"
+
+    @property
+    def is_missing(self) -> bool:
+        return self.missing_since is not None
 
 
 class WPAnnotation(Base):

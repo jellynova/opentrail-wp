@@ -234,6 +234,25 @@ export interface WorkingPaper {
   reviewer_signed_off_by_user_id: number | null
   reviewer_signed_off_by_username: string | null
   reviewer_signed_off_at: string | null
+
+  // Shared-drive storage (CaseWare-style single-copy filing)
+  storage_backend: 'managed' | 'shared_drive'
+  is_missing: boolean
+  missing_since: string | null
+  backup_path: string | null
+}
+
+export interface SharedDriveStatus {
+  enabled: boolean
+  label: string
+}
+
+export interface SharedDriveEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number | null
+  modified_at: string | null
 }
 
 export interface FolderNode {

@@ -8,6 +8,7 @@ signed-off document is modified.
 import mimetypes
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.document import WorkingPaper, WPAnnotation
@@ -24,6 +26,9 @@ from app.schemas.document import (
     AnnotationCreate,
     AnnotationResponse,
     FolderNode,
+    LinkSharedDriveFile,
+    SharedDriveEntry,
+    SharedDriveStatus,
     SignOffRequest,
     SignOffResponse,
     WorkingPaperResponse,
@@ -74,6 +79,7 @@ def _detail(
     *,
     versions: Optional[List[WorkingPaper]] = None,
     usernames: Optional[Dict[int, str]] = None,
+    check_drift: bool = True,
 ) -> WorkingPaperResponse:
     versions = versions if versions is not None else _versions(db, row)
     if usernames is None:
@@ -81,6 +87,8 @@ def _detail(
             db,
             {row.uploaded_by_user_id, row.preparer_signed_off_by_user_id, row.reviewer_signed_off_by_user_id},
         )
+    if check_drift and row.storage_backend == "shared_drive":
+        _apply_drift(db, row)
     state = doc_mgr.sign_off_status(versions, row)
     return WorkingPaperResponse(
         id=row.id,
@@ -107,7 +115,37 @@ def _detail(
         reviewer_signed_off_by_user_id=row.reviewer_signed_off_by_user_id,
         reviewer_signed_off_by_username=usernames.get(row.reviewer_signed_off_by_user_id),
         reviewer_signed_off_at=row.reviewer_signed_off_at,
+        storage_backend=row.storage_backend,
+        is_missing=row.is_missing,
+        missing_since=row.missing_since,
+        backup_path=row.backup_path,
     )
+
+
+def _apply_drift(db: Session, row: WorkingPaper) -> dict:
+    """
+    Run the shared-drive drift check and, when content has genuinely changed outside
+    the app, refresh the stored metadata and -- if it was signed off -- void that sign-off
+    the same way an in-app edit would (someone editing the file directly on the network
+    drive is still a change to what was reviewed, signed off or not). A merely-missing
+    file (e.g. VPN down) touches neither metadata nor sign-off state.
+    """
+    result = doc_mgr.check_drift(row)
+    if result["status"] == "modified":
+        try:
+            live_bytes = doc_mgr.get_file_bytes(row)
+            doc_mgr.stamp_from_bytes(row, live_bytes)
+            row.file_size = len(live_bytes)
+        except FileNotFoundError:
+            pass
+        if row.preparer_signed_off_at or row.reviewer_signed_off_at:
+            row.preparer_signed_off_by_user_id = None
+            row.preparer_signed_off_at = None
+            row.reviewer_signed_off_by_user_id = None
+            row.reviewer_signed_off_at = None
+            row.requires_reapproval = True
+    db.flush()
+    return result
 
 
 def _get_document_or_404(db: Session, document_id: int) -> WorkingPaper:
@@ -169,6 +207,88 @@ def _annotation_response(db: Session, annotation: WPAnnotation, usernames: Optio
         resolved_by_username=usernames.get(annotation.resolved_by_user_id),
         resolved_at=annotation.resolved_at,
     )
+
+
+# --------------------------------------------------------------------------------------
+# Shared drive (PLAN: CaseWare-style single-copy filing on a network drive / SharePoint
+# sync folder, instead of OpenTrail ingesting its own copy)
+# --------------------------------------------------------------------------------------
+
+
+@router.get("/documents/shared-drive/status", response_model=SharedDriveStatus)
+def shared_drive_status(current_user: User = Depends(get_current_active_user)):
+    """Whether a shared drive is configured app-wide, for the upload/link UI to branch on."""
+    return SharedDriveStatus(enabled=doc_mgr.shared_drive_enabled(), label=settings.SHARED_DRIVE_LABEL)
+
+
+@router.get("/documents/shared-drive/browse", response_model=List[SharedDriveEntry])
+def browse_shared_drive(
+    path: str = Query("", description="Folder relative to the shared drive root; empty for the root"),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List a folder's immediate contents, for picking an existing file to link."""
+    try:
+        return [SharedDriveEntry(**entry) for entry in doc_mgr.browse_shared_drive(path)]
+    except doc_mgr.InvalidFolderPath as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.post("/documents/link", response_model=WorkingPaperResponse, status_code=status.HTTP_201_CREATED)
+def link_shared_drive_file(
+    data: LinkSharedDriveFile,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(*EDIT_ROLES)),
+):
+    """
+    Point OpenTrail at a file that ALREADY exists on the shared drive -- the organization's
+    normal filing system stays the one and only copy; OpenTrail stores a path reference
+    plus a content hash, never the bytes.
+    """
+    if not doc_mgr.shared_drive_enabled():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No shared drive is configured")
+    if db.get(FiscalYear, data.fiscal_year_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiscal year not found")
+    folder = _clean_folder(data.folder_path)
+
+    try:
+        rel = doc_mgr.clean_relative_path(data.shared_drive_path)
+        stat_info = doc_mgr.stat_shared_drive_file(data.shared_drive_path)
+    except doc_mgr.InvalidFolderPath as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    original_filename = os.path.basename(rel)
+    wp = WorkingPaper(
+        fiscal_year_id=data.fiscal_year_id,
+        folder_path=folder,
+        filename=rel,  # full path relative to SHARED_DRIVE_PATH; see get_file_path()
+        display_name=data.display_name or original_filename,
+        file_type=_file_type_from_ext(original_filename),
+        file_size=stat_info["size"],
+        uploaded_by_user_id=current_user.id,
+        uploaded_at=datetime.now(timezone.utc),
+        description=data.description,
+        version_number=1,
+        storage_backend="shared_drive",
+        content_hash=stat_info["content_hash"],
+        source_mtime=stat_info["mtime"],
+    )
+    db.add(wp)
+    db.flush()
+
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="link",
+        resource_type="document",
+        resource_id=wp.id,
+        new={"display_name": wp.display_name, "shared_drive_path": rel, "folder_path": wp.folder_path},
+        summary=f"linked {wp.display_name} from the shared drive",
+        request=request,
+        commit=True,
+    )
+    db.refresh(wp)
+    return _detail(db, wp, check_drift=False)
 
 
 # --------------------------------------------------------------------------------------
@@ -286,7 +406,8 @@ async def upload_document(
     content = await file.read()
     original_filename = _validate_upload(file, content)
     stored_filename = _stored_filename(original_filename)
-    relative_path = doc_mgr.save_file(content, folder, stored_filename)
+    backend = doc_mgr.default_storage_backend()
+    relative_path = doc_mgr.save_file(content, folder, stored_filename, storage_backend=backend)
 
     wp = WorkingPaper(
         fiscal_year_id=fiscal_year_id,
@@ -299,9 +420,12 @@ async def upload_document(
         uploaded_at=datetime.now(timezone.utc),
         description=description,
         version_number=1,
+        storage_backend=backend,
     )
     db.add(wp)
     db.flush()
+    if backend == "shared_drive":
+        doc_mgr.stamp_from_bytes(wp, content)
 
     audit_svc.record(
         db,
@@ -309,13 +433,13 @@ async def upload_document(
         action="upload",
         resource_type="document",
         resource_id=wp.id,
-        new={"display_name": wp.display_name, "folder_path": wp.folder_path, "size": wp.file_size},
-        summary=f"uploaded {wp.display_name} to {wp.folder_path}",
+        new={"display_name": wp.display_name, "folder_path": wp.folder_path, "size": wp.file_size, "storage_backend": backend},
+        summary=f"uploaded {wp.display_name} to {wp.folder_path}" + (" (shared drive)" if backend == "shared_drive" else ""),
         request=request,
         commit=True,
     )
     db.refresh(wp)
-    return _detail(db, wp)
+    return _detail(db, wp, check_drift=False)
 
 
 @router.post(
@@ -345,9 +469,29 @@ async def upload_new_version(
 
     content = await file.read()
     original_filename = _validate_upload(file, content)
-    stored_filename = _stored_filename(original_filename)
     folder = _clean_folder(folder_path) if folder_path else root.folder_path
-    relative_path = doc_mgr.save_file(content, folder, stored_filename)
+    backend = root.storage_backend
+
+    backup_path: Optional[str] = None
+    new_filename: str
+    if backend == "shared_drive":
+        # The canonical path never changes version to version -- that IS the point (one
+        # file on the shared drive, not a new copy per version). Back up what's there
+        # now before overwriting it in place. A linked file's `filename` may be a deep
+        # path independent of the binder folder, so keep it exactly as-is.
+        if folder != root.folder_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A shared-drive document's folder can't change between versions; "
+                "delete and re-link it instead.",
+            )
+        backup_path = doc_mgr.backup_before_overwrite(latest)
+        new_filename = latest.filename
+        doc_mgr.overwrite_file(latest, content)  # overwrites in place at the canonical path
+    else:
+        stored_filename = _stored_filename(original_filename)
+        relative_path = doc_mgr.save_file(content, folder, stored_filename, storage_backend=backend)
+        new_filename = os.path.basename(relative_path)
 
     previous_state = doc_mgr.sign_off_status(_versions(db, root), latest)
 
@@ -356,7 +500,7 @@ async def upload_new_version(
     new_version = WorkingPaper(
         fiscal_year_id=root.fiscal_year_id,
         folder_path=folder,
-        filename=os.path.basename(relative_path),
+        filename=new_filename,
         display_name=display_name or latest.display_name,
         file_type=_file_type_from_ext(original_filename),
         file_size=len(content),
@@ -367,9 +511,13 @@ async def upload_new_version(
         parent_version_id=root.id,
         # A replacement of a signed-off paper needs the reviewer's eyes again.
         requires_reapproval=previous_state["sign_off_state"] != "draft",
+        storage_backend=backend,
+        backup_path=backup_path,
     )
     db.add(new_version)
     db.flush()
+    if backend == "shared_drive":
+        doc_mgr.stamp_from_bytes(new_version, content)
 
     audit_svc.record(
         db,
@@ -382,13 +530,14 @@ async def upload_new_version(
             "version_number": new_version.version_number,
             "display_name": new_version.display_name,
             "requires_reapproval": new_version.requires_reapproval,
+            "backup_path": backup_path,
         },
         summary=f"uploaded version {new_version.version_number} of {new_version.display_name}",
         request=request,
         commit=True,
     )
     db.refresh(new_version)
-    return _detail(db, new_version)
+    return _detail(db, new_version, check_drift=False)
 
 
 @router.put("/documents/{document_id}", response_model=WorkingPaperResponse)
@@ -525,7 +674,11 @@ def delete_document(
 
     names = [v.display_name for v in versions]
     for version in versions:
-        doc_mgr.delete_file(doc_mgr.get_file_path(version))
+        # Shared-drive bytes belong to the organization's own filing system, not to
+        # OpenTrail -- removing the link here must never touch the live file or its
+        # backups. Only a "managed" document's bytes are actually OpenTrail's to delete.
+        if version.storage_backend != "shared_drive":
+            doc_mgr.delete_file(doc_mgr.get_file_path(version))
         db.delete(version)
 
     audit_svc.record(

@@ -9,6 +9,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  FolderSearch,
   History,
   Image as ImageIcon,
   Link2,
@@ -19,6 +20,8 @@ import {
   ShieldCheck,
   Trash2,
   Upload,
+  AlertTriangle,
+  HardDrive,
 } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
@@ -38,13 +41,16 @@ import { useAuthStore } from '@/store/auth'
 import { useFiscalYears } from '@/hooks/useFiscalYears'
 import {
   useAddAnnotation,
+  useBrowseSharedDrive,
   useDeleteAnnotation,
   useDeleteDocument,
   useDocumentAnnotations,
   useDocumentFolders,
   useDocuments,
   useDocumentVersions,
+  useLinkSharedDriveFile,
   useResolveAnnotation,
+  useSharedDriveStatus,
   useSignOffDocument,
   useUpdateDocument,
   useUploadDocument,
@@ -390,6 +396,129 @@ function DocumentDialog({
   )
 }
 
+/** Browse the shared drive and point OpenTrail at an existing file without copying it. */
+function LinkSharedDriveDialog({
+  open,
+  driveLabel,
+  fiscalYearId,
+  folderPath,
+  onClose,
+}: {
+  open: boolean
+  driveLabel: string
+  fiscalYearId: number | null
+  folderPath: string
+  onClose: () => void
+}) {
+  const [browsePath, setBrowsePath] = useState('')
+  const [selected, setSelected] = useState<string | null>(null)
+  const [displayName, setDisplayName] = useState('')
+  const { data: entries, isLoading } = useBrowseSharedDrive(browsePath, open)
+  const link = useLinkSharedDriveFile()
+
+  const crumbs = ['', ...(browsePath ? browsePath.split('/') : [])]
+
+  const reset = () => {
+    setBrowsePath('')
+    setSelected(null)
+    setDisplayName('')
+    onClose()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && reset()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Link a file from {driveLabel}</DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground">
+          Point OpenTrail at a file that's already in your organization's filing system —
+          it stays exactly where it is; nothing is copied.
+        </p>
+        <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+          {crumbs.map((_, i) => {
+            const pathToHere = crumbs.slice(1, i + 1).join('/')
+            const label = i === 0 ? driveLabel : crumbs[i]
+            return (
+              <span key={i} className="flex items-center gap-1">
+                {i > 0 && <ChevronRight className="h-3 w-3" />}
+                <button className="hover:underline hover:text-foreground" onClick={() => setBrowsePath(pathToHere)}>
+                  {label}
+                </button>
+              </span>
+            )
+          })}
+        </div>
+        <div className="max-h-64 overflow-y-auto rounded-md border">
+          {isLoading ? (
+            <LoadingSpinner />
+          ) : !entries?.length ? (
+            <p className="p-4 text-center text-xs text-muted-foreground">Empty folder.</p>
+          ) : (
+            entries.map((e) => (
+              <button
+                key={e.path}
+                className={`flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted ${
+                  selected === e.path ? 'bg-primary/10' : ''
+                }`}
+                onClick={() => {
+                  if (e.is_dir) {
+                    setBrowsePath(e.path)
+                  } else {
+                    setSelected(e.path)
+                    setDisplayName(e.name)
+                  }
+                }}
+              >
+                {e.is_dir ? <Folder className="h-4 w-4 text-muted-foreground" /> : <File className="h-4 w-4 text-muted-foreground" />}
+                <span className="flex-1 truncate">{e.name}</span>
+                {!e.is_dir && e.size !== null && (
+                  <span className="text-xs text-muted-foreground">{formatFileSize(e.size)}</span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+        {selected && (
+          <div className="space-y-1">
+            <Label>Display name</Label>
+            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Will be filed under {folderPath}</p>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={reset}>Cancel</Button>
+          <Button
+            disabled={!selected || !fiscalYearId || link.isPending}
+            onClick={() => {
+              if (!selected || !fiscalYearId) return
+              link.mutate(
+                {
+                  fiscal_year_id: fiscalYearId,
+                  folder_path: folderPath,
+                  shared_drive_path: selected,
+                  display_name: displayName.trim() || undefined,
+                },
+                {
+                  onSuccess: () => {
+                    toast({ title: 'File linked from the shared drive' })
+                    reset()
+                  },
+                  onError: (err) =>
+                    toast({ title: 'Could not link file', description: apiErrorMessage(err), variant: 'destructive' }),
+                }
+              )
+            }}
+          >
+            {link.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Link
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function DocumentsPage() {
   const user = useAuthStore((s) => s.user)
   const canEdit = user?.role === 'finance_admin' || user?.role === 'finance_officer'
@@ -407,10 +536,12 @@ export function DocumentsPage() {
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [isDragging, setIsDragging] = useState(false)
+  const [linkOpen, setLinkOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: fiscalYears } = useFiscalYears()
   const { data: folders, isLoading: foldersLoading } = useDocumentFolders(fiscalYearFilter)
+  const { data: sharedDrive } = useSharedDriveStatus()
   const { data: documents, isLoading } = useDocuments({
     folder_path: selectedFolder,
     fiscal_year_id: fiscalYearFilter,
@@ -477,16 +608,32 @@ export function DocumentsPage() {
         title="Documents"
         description="Working papers, financial statements and supporting documents, with preparer and reviewer sign-off"
         actions={
-          <Button size="sm" onClick={() => setUploadOpen(true)} disabled={upload.isPending || !canEdit}>
-            {upload.isPending ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Upload className="mr-2 h-4 w-4" />
+          <div className="flex gap-2">
+            {sharedDrive?.enabled && (
+              <Button size="sm" variant="outline" onClick={() => setLinkOpen(true)} disabled={!canEdit}>
+                <FolderSearch className="mr-2 h-4 w-4" />
+                Link from {sharedDrive.label}
+              </Button>
             )}
-            Upload
-          </Button>
+            <Button size="sm" onClick={() => setUploadOpen(true)} disabled={upload.isPending || !canEdit}>
+              {upload.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="mr-2 h-4 w-4" />
+              )}
+              Upload
+            </Button>
+          </div>
         }
       />
+
+      {sharedDrive?.enabled && (
+        <div className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+          <HardDrive className="h-4 w-4 shrink-0" />
+          New uploads are saved directly to <strong>{sharedDrive.label}</strong> — there is one copy of
+          each document, in your organization's existing filing system, not a separate one inside OpenTrail.
+        </div>
+      )}
 
       <div className="flex flex-col gap-4 md:flex-row">
         {/* Folder tree */}
@@ -576,7 +723,19 @@ export function DocumentsPage() {
                         <div className="flex items-center gap-2">
                           <FileTypeIcon type={doc.file_type} />
                           <div className="min-w-0">
-                            <p className="truncate text-sm font-medium">{doc.display_name}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="truncate text-sm font-medium">{doc.display_name}</p>
+                              {doc.storage_backend === 'shared_drive' && (
+                                <span title={`Linked from ${sharedDrive?.label ?? 'the shared drive'}, not copied`}>
+                                  <HardDrive className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                                </span>
+                              )}
+                              {doc.is_missing && (
+                                <span title="File not found on the shared drive — it may have been moved or deleted outside OpenTrail">
+                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                                </span>
+                              )}
+                            </div>
                             {doc.description && (
                               <p className="truncate text-xs text-muted-foreground">{doc.description}</p>
                             )}
@@ -782,6 +941,13 @@ export function DocumentsPage() {
         document={relatedPaper}
         allDocuments={documents ?? []}
         onClose={() => setRelatedPaper(null)}
+      />
+      <LinkSharedDriveDialog
+        open={linkOpen}
+        driveLabel={sharedDrive?.label ?? 'the shared drive'}
+        fiscalYearId={uploadFiscalYear ?? openFiscalYear?.id ?? null}
+        folderPath={selectedFolder}
+        onClose={() => setLinkOpen(false)}
       />
     </div>
   )

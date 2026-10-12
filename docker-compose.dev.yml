@@ -23,6 +23,8 @@ services:
       FERNET_KEY: ${FERNET_KEY}
       ALLOWED_ORIGINS: http://localhost:5173
       DOCUMENTS_PATH: /app/documents
+      SHARED_DRIVE_PATH: ${SHARED_DRIVE_PATH:-}
+      SHARED_DRIVE_LABEL: ${SHARED_DRIVE_LABEL:-Shared Drive}
       DEBUG: "true"
     ports:
       - "8000:8000"

@@ -27,8 +27,18 @@ services:
       FERNET_KEY: ${FERNET_KEY}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost}
       DOCUMENTS_PATH: /app/documents
+      # Point this at a bind-mounted network drive / SharePoint sync folder to make
+      # OpenTrail store new documents there instead of its own volume (see
+      # backend/app/core/config.py and services/document_manager.py). Leave blank to
+      # keep the original managed-storage behaviour.
+      SHARED_DRIVE_PATH: ${SHARED_DRIVE_PATH:-}
+      SHARED_DRIVE_LABEL: ${SHARED_DRIVE_LABEL:-Shared Drive}
     volumes:
       - documents_data:/app/documents
+      # Example: mount a host path (itself a mapped network drive / SMB mount / OneDrive
+      # or SharePoint sync folder) read-write into the container, then set
+      # SHARED_DRIVE_PATH=/app/shared-drive above to point OpenTrail at it.
+      - ${SHARED_DRIVE_HOST_PATH:-./.shared-drive-disabled}:/app/shared-drive
     expose:
       - "8000"
 

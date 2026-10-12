@@ -33,6 +33,12 @@ class WorkingPaperResponse(BaseModel):
     reviewer_signed_off_by_username: Optional[str] = None
     reviewer_signed_off_at: Optional[datetime] = None
 
+    # Shared-drive storage (CaseWare-style single-copy filing)
+    storage_backend: str = "managed"  # "managed" | "shared_drive"
+    is_missing: bool = False  # the live file was not found on the shared drive
+    missing_since: Optional[datetime] = None
+    backup_path: Optional[str] = None  # where THIS version's predecessor was backed up
+
     model_config = {"from_attributes": True}
 
 
@@ -90,3 +96,24 @@ class SignOffResponse(BaseModel):
     document_id: int
     sign_off_state: str
     requires_reapproval: bool = False
+
+
+class SharedDriveStatus(BaseModel):
+    enabled: bool
+    label: str = "Shared Drive"
+
+
+class SharedDriveEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+    size: Optional[int] = None
+    modified_at: Optional[str] = None
+
+
+class LinkSharedDriveFile(BaseModel):
+    fiscal_year_id: int
+    folder_path: str = "/permanent"
+    shared_drive_path: str  # path to an existing file, relative to SHARED_DRIVE_PATH
+    display_name: Optional[str] = None
+    description: Optional[str] = None

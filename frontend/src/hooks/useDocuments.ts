@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
-import type { FolderNode, WPAnnotation, WorkingPaper } from '@/types'
+import type { FolderNode, SharedDriveEntry, SharedDriveStatus, WPAnnotation, WorkingPaper } from '@/types'
 
 function invalidateDocuments(queryClient: ReturnType<typeof useQueryClient>) {
   for (const key of ['documents', 'document-versions', 'document-annotations', 'document-folders']) {
@@ -98,6 +98,38 @@ export function useUploadNewVersion() {
         })
         .then((r) => r.data)
     },
+    onSuccess: () => invalidateDocuments(queryClient),
+  })
+}
+
+// ── Shared drive (CaseWare-style single-copy filing on a network drive) ─────
+
+export function useSharedDriveStatus() {
+  return useQuery({
+    queryKey: ['shared-drive-status'],
+    queryFn: () => api.get<SharedDriveStatus>('/v1/documents/shared-drive/status').then((r) => r.data),
+  })
+}
+
+export function useBrowseSharedDrive(path: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['shared-drive-browse', path],
+    queryFn: () =>
+      api.get<SharedDriveEntry[]>('/v1/documents/shared-drive/browse', { params: { path } }).then((r) => r.data),
+    enabled,
+  })
+}
+
+export function useLinkSharedDriveFile() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: {
+      fiscal_year_id: number
+      folder_path: string
+      shared_drive_path: string
+      display_name?: string
+      description?: string
+    }) => api.post<WorkingPaper>('/v1/documents/link', payload).then((r) => r.data),
     onSuccess: () => invalidateDocuments(queryClient),
   })
 }

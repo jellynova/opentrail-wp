@@ -77,6 +77,17 @@ def documents_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
+def shared_drive_dir(tmp_path, monkeypatch):
+    """Turn on shared-drive mode, pointed at a temp directory, for the duration of a test."""
+    from app.core.config import settings
+
+    path = tmp_path / "shared-drive"
+    path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "SHARED_DRIVE_PATH", str(path))
+    return path
+
+
+@pytest.fixture()
 def users(db) -> Dict[str, User]:
     """One user per role, plus a second finance officer (for segregation-of-duties tests)."""
     specs = [

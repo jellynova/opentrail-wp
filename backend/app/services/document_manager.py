@@ -3,8 +3,10 @@ Document manager: file system operations and folder/version helpers for working 
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -33,6 +35,43 @@ class InvalidFolderPath(ValueError):
 
 def _base_path() -> Path:
     return Path(settings.DOCUMENTS_PATH)
+
+
+def shared_drive_enabled() -> bool:
+    """True once an admin has configured SHARED_DRIVE_PATH; drives the app-wide switch."""
+    return bool(settings.SHARED_DRIVE_PATH.strip())
+
+
+def _shared_drive_root() -> Path:
+    if not shared_drive_enabled():
+        raise InvalidFolderPath("No shared drive is configured (SHARED_DRIVE_PATH is empty)")
+    return Path(settings.SHARED_DRIVE_PATH)
+
+
+def _root_for(storage_backend: str) -> Path:
+    return _shared_drive_root() if storage_backend == "shared_drive" else _base_path()
+
+
+_SAFE_RELATIVE_SEGMENT = re.compile(r"^[^/\\\0]+$")
+
+
+def clean_relative_path(relative_path: str) -> str:
+    """
+    Normalise and validate a path relative to a storage root (shared drive or managed).
+
+    Rejects '..' traversal and absolute paths; this is what keeps a crafted shared-drive
+    path (typed by a user picking an "existing file") from escaping SHARED_DRIVE_PATH.
+    """
+    raw = (relative_path or "").strip().replace("\\", "/").strip("/")
+    if not raw:
+        raise InvalidFolderPath("A path is required")
+    parts = [p for p in raw.split("/") if p != ""]
+    if any(p in (".", "..") for p in parts):
+        raise InvalidFolderPath("Paths may not contain '.' or '..'")
+    for p in parts:
+        if not _SAFE_RELATIVE_SEGMENT.match(p):
+            raise InvalidFolderPath(f"Invalid path segment: '{p}'")
+    return "/".join(parts)
 
 
 def clean_folder_path(folder_path: Optional[str]) -> str:
@@ -186,22 +225,23 @@ def sign_off_status(versions: Iterable[WorkingPaper], latest: WorkingPaper) -> d
     }
 
 
-def save_file(file_content: bytes, folder_path: str, filename: str) -> str:
+def save_file(file_content: bytes, folder_path: str, filename: str, *, storage_backend: str = "managed") -> str:
     """
-    Save file bytes to DOCUMENTS_PATH/<folder_path>/<filename>.
+    Save file bytes to <root>/<folder_path>/<filename>, where <root> is the managed
+    documents volume or the configured shared drive depending on ``storage_backend``.
 
-    Creates intermediate directories as needed. Returns the path relative to
-    DOCUMENTS_PATH for storage in the DB. The folder path is validated (binder roots only,
-    no traversal) and the file name is reduced to its base name, so a crafted upload
-    cannot escape the documents volume.
+    Creates intermediate directories as needed. Returns the path relative to the root for
+    storage in the DB. The folder path is validated (binder roots only, no traversal) and
+    the file name is reduced to its base name, so a crafted upload cannot escape the
+    storage volume.
     """
     folder_clean = relative_folder(folder_path)
     safe_name = os.path.basename(filename or "").strip() or "upload"
-    dest_dir = _base_path() / folder_clean
+    dest_dir = _root_for(storage_backend) / folder_clean
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     dest_file = dest_dir / safe_name
-    # Never follow a symlink out of the documents volume.
+    # Never follow a symlink out of the storage volume.
     if dest_file.is_symlink():
         dest_file.unlink()
     dest_file.write_bytes(file_content)
@@ -209,14 +249,23 @@ def save_file(file_content: bytes, folder_path: str, filename: str) -> str:
     return str(Path(folder_clean) / safe_name)
 
 
-def delete_file(file_path: str) -> None:
+def default_storage_backend() -> str:
+    """
+    Which backend a brand-new upload should land on. Once a shared drive is configured
+    it is used for everything new (PLAN: no more copies drifting from the org's existing
+    filing system) -- "managed" survives only for documents uploaded before that happened.
+    """
+    return "shared_drive" if shared_drive_enabled() else "managed"
+
+
+def delete_file(file_path: str, *, storage_backend: str = "managed") -> None:
     """
     Delete a stored file. Accepts either an absolute path (as returned by
-    ``get_file_path``) or one relative to DOCUMENTS_PATH. Missing files are ignored.
+    ``get_file_path``) or one relative to the storage root. Missing files are ignored.
     """
     path = Path(file_path)
     if not path.is_absolute():
-        path = _base_path() / file_path.lstrip("/")
+        path = _root_for(storage_backend) / file_path.lstrip("/")
     try:
         path.unlink(missing_ok=True)
     except Exception:
@@ -224,9 +273,15 @@ def delete_file(file_path: str) -> None:
 
 
 def get_file_path(document: WorkingPaper) -> str:
-    """Absolute filesystem path for a WorkingPaper document."""
+    """Absolute filesystem path for a WorkingPaper document, on its own storage backend."""
+    root = _root_for(document.storage_backend)
+    if document.storage_backend == "shared_drive" and "/" in document.filename:
+        # A linked document's `filename` is its full path relative to the shared drive
+        # root (it may live anywhere in the org's existing structure); `folder_path` is
+        # only where it's organized in OpenTrail's own binder tree, not its real location.
+        return str(root / document.filename)
     folder_clean = relative_folder(document.folder_path)
-    return str(_base_path() / folder_clean / os.path.basename(document.filename))
+    return str(root / folder_clean / os.path.basename(document.filename))
 
 
 def get_file_bytes(document: WorkingPaper) -> bytes:
@@ -237,6 +292,157 @@ def get_file_bytes(document: WorkingPaper) -> bytes:
     return path.read_bytes()
 
 
+def overwrite_file(document: WorkingPaper, content: bytes) -> None:
+    """
+    Write ``content`` to exactly where ``get_file_path(document)`` says this document's
+    bytes live -- the one path-resolution rule, used for both the regular binder layout
+    and a linked document's (possibly deep, binder-independent) real shared-drive path.
+    """
+    path = Path(get_file_path(document))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        path.unlink()
+    path.write_bytes(content)
+
+
 def file_exists(document: WorkingPaper) -> bool:
     """Check whether the underlying file exists on disk."""
     return Path(get_file_path(document)).exists()
+
+
+# --------------------------------------------------------------------------------------
+# Shared-drive specifics: hashing, drift detection, browsing, versioned backups
+# --------------------------------------------------------------------------------------
+
+
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def stamp_from_bytes(document: WorkingPaper, content: bytes) -> None:
+    """Record content_hash/source_mtime for ``document`` after writing ``content``."""
+    document.content_hash = sha256_of(content)
+    path = Path(get_file_path(document))
+    document.source_mtime = path.stat().st_mtime if path.exists() else None
+    document.missing_since = None
+
+
+def check_drift(document: WorkingPaper) -> dict:
+    """
+    Compare the live file on disk against what was last recorded for a shared-drive
+    document. Cheap by default (just a stat): only re-hashes when the mtime or size has
+    moved, since someone editing the file directly on the network drive is the whole
+    point of this storage mode and OpenTrail has no other way to find out.
+
+    Returns {"status": "ok" | "missing" | "modified", "checked_at": ...}. Mutates
+    ``document``'s missing_since (caller is responsible for committing).
+    """
+    if document.storage_backend != "shared_drive":
+        return {"status": "ok"}
+
+    path = Path(get_file_path(document))
+    if not path.exists():
+        if document.missing_since is None:
+            document.missing_since = datetime.now(timezone.utc)
+        return {"status": "missing"}
+
+    stat = path.stat()
+    if document.missing_since is not None:
+        document.missing_since = None  # it came back; a hash check below confirms content
+
+    mtime_matches = document.source_mtime is not None and abs(stat.st_mtime - document.source_mtime) < 1.0
+    size_matches = stat.st_size == document.file_size
+    if mtime_matches and size_matches:
+        return {"status": "ok"}
+
+    # mtime or size moved -- confirm with an actual hash before flagging, since some
+    # network filesystems round-trip mtimes imprecisely.
+    actual_hash = sha256_of(path.read_bytes())
+    if actual_hash == document.content_hash:
+        document.source_mtime = stat.st_mtime
+        document.file_size = stat.st_size
+        return {"status": "ok"}
+    return {"status": "modified"}
+
+
+def backup_before_overwrite(document: WorkingPaper) -> Optional[str]:
+    """
+    Copy a shared-drive document's CURRENT live bytes into a dated backup file next to
+    it, before a new version overwrites the canonical path in place. Returns the backup's
+    path relative to SHARED_DRIVE_PATH, or None if there was nothing to back up (first
+    version, or the live file is already missing).
+
+    The backup lives in a ``.opentrail-versions`` sub-folder alongside the document on the
+    SAME shared drive -- it is version history, not a second filing system.
+    """
+    if document.storage_backend != "shared_drive":
+        return None
+    live_path = Path(get_file_path(document))
+    if not live_path.exists():
+        return None
+
+    folder_clean = relative_folder(document.folder_path)
+    backup_dir = _shared_drive_root() / folder_clean / ".opentrail-versions"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    base = os.path.splitext(os.path.basename(document.filename))[0]
+    ext = os.path.splitext(document.filename)[1]
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_name = f"{base}__v{document.version_number}_{timestamp}{ext}"
+    backup_path = backup_dir / backup_name
+    backup_path.write_bytes(live_path.read_bytes())
+
+    return str(Path(folder_clean) / ".opentrail-versions" / backup_name)
+
+
+def browse_shared_drive(relative_path: str = "") -> List[dict]:
+    """
+    List immediate children (folders then files) of a path under the shared drive root,
+    for the "link an existing file" picker -- so staff can point OpenTrail at a document
+    already sitting in the organization's normal filing system without uploading a
+    redundant copy through the browser.
+    """
+    root = _shared_drive_root()
+    rel = clean_relative_path(relative_path) if relative_path.strip("/") else ""
+    target = (root / rel) if rel else root
+    if not target.exists() or not target.is_dir():
+        raise InvalidFolderPath(f"'{relative_path or '/'}' is not a folder on the shared drive")
+
+    entries = []
+    try:
+        children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        raise InvalidFolderPath(f"Permission denied reading '{relative_path or '/'}' on the shared drive")
+
+    for child in children:
+        if child.name.startswith(".") or child.name == ".opentrail-versions":
+            continue  # hide dotfiles and our own backup folders from the picker
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(Path(rel) / child.name) if rel else child.name,
+                "is_dir": child.is_dir(),
+                "size": stat.st_size if child.is_file() else None,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return entries
+
+
+def stat_shared_drive_file(relative_path: str) -> dict:
+    """Metadata for a file on the shared drive, for linking it without copying bytes."""
+    root = _shared_drive_root()
+    rel = clean_relative_path(relative_path)
+    target = root / rel
+    if not target.exists() or not target.is_file():
+        raise InvalidFolderPath(f"'{relative_path}' is not a file on the shared drive")
+    stat = target.stat()
+    return {
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "content_hash": sha256_of(target.read_bytes()),
+    }
