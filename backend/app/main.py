@@ -31,6 +31,7 @@ from app.api.v1 import (
     tca,
     events,
     imports,
+    materiality,
 )
 
 
@@ -160,6 +161,9 @@ app.include_router(imports.router, prefix="/api/v1", tags=["imports"])
 
 # Audit trail / activity log
 app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
+
+# Materiality (flagging leadsheet accounts with no supporting documents)
+app.include_router(materiality.router, prefix="/api/v1", tags=["materiality"])
 
 
 @app.get("/health", tags=["health"])

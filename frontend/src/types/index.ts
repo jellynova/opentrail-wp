@@ -515,6 +515,40 @@ export interface LeadsheetsResponse {
   leadsheets: LeadsheetGroup[]
 }
 
+// ── Materiality (flag leadsheet accounts with no supporting docs) ──────────
+
+export interface Materiality {
+  id: number
+  fiscal_year_id: number
+  overall_materiality: string
+  performance_materiality: string | null
+  trivial_threshold: string | null
+  flagging_threshold: string
+  basis: string | null
+  rationale: string | null
+  set_by_user_id: number
+  set_by_username: string | null
+  set_at: string
+  updated_at: string
+}
+
+export interface UnsupportedMaterialAccount {
+  account_id: number
+  acct_fmtd: string
+  description: string | null
+  classification: string | null
+  final_balance: string
+  threshold: string
+  excess: string
+}
+
+export interface UnsupportedMaterialAccountsResponse {
+  period_id: number
+  threshold: string | null
+  threshold_basis: 'performance_materiality' | 'overall_materiality' | null
+  accounts: UnsupportedMaterialAccount[]
+}
+
 /** A document attached to a leadsheet account code (document_account_links). */
 export interface AccountLink {
   id: number
