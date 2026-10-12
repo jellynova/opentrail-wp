@@ -125,6 +125,51 @@ def consolidate_requests(db: Session, budget_year: BudgetYear) -> int:
     return replace_lines(db, budget_year, totals)
 
 
+def get_or_create_budget_year(db: Session, fiscal_year_id: int, created_by_user_id: int) -> BudgetYear:
+    """The fiscal year's budget year, creating one (status 'setup') if none exists yet."""
+    by = budget_year_for_fiscal_year(db, fiscal_year_id)
+    if by is not None:
+        return by
+    fy = db.get(FiscalYear, fiscal_year_id)
+    label = f"{fy.label} Budget" if fy is not None else f"Fiscal year {fiscal_year_id} budget"
+    by = BudgetYear(fiscal_year_id=fiscal_year_id, label=label, status="setup", created_by=created_by_user_id)
+    db.add(by)
+    db.flush()
+    return by
+
+
+def upsert_budget_lines_for_fiscal_year(
+    db: Session, fiscal_year_id: int, totals: Dict[int, Decimal], created_by_user_id: int,
+) -> int:
+    """
+    Set (not add to) BudgetLine.approved_amount per account from a totals map — used when a
+    trial balance import also carries a mapped budget column, since several ERPs export
+    actuals and budget together. Creates the fiscal year's budget year if none exists yet.
+    Does not touch amendments; re-running the same import overwrites the original amount
+    with the same figure rather than double-counting it.
+    """
+    if not totals:
+        return 0
+    by = get_or_create_budget_year(db, fiscal_year_id, created_by_user_id)
+    accounts = load_accounts(db, totals.keys())
+    existing = {
+        bl.account_id: bl
+        for bl in db.scalars(
+            select(BudgetLine).where(BudgetLine.budget_year_id == by.id, BudgetLine.account_id.in_(totals.keys()))
+        ).all()
+    }
+    for acct_id, amount in totals.items():
+        acct = accounts.get(acct_id)
+        budget_type = "capital" if acct is not None and acct.capital_acct else "operating"
+        line = existing.get(acct_id)
+        if line is not None:
+            line.approved_amount = amount
+            line.budget_type = budget_type
+        else:
+            db.add(BudgetLine(budget_year_id=by.id, account_id=acct_id, approved_amount=amount, budget_type=budget_type))
+    return len(totals)
+
+
 def replace_lines(db: Session, budget_year: BudgetYear, totals: Dict[int, Decimal]) -> int:
     for bl in db.scalars(select(BudgetLine).where(BudgetLine.budget_year_id == budget_year.id)).all():
         db.delete(bl)

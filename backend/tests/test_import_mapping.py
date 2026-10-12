@@ -416,3 +416,175 @@ def test_import_invalid_json_column_map_422(client, auth, fy2025):
         data={"column_map": "not json"},
     )
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Multi-period trial balance import (one file, several periods via a mapped
+# "period" column) and inline budget import (a mapped "budget" column).
+# ---------------------------------------------------------------------------
+
+def test_tb_import_multiple_periods_one_file(client, auth, fy2025, db):
+    """A mapped 'period' column splits one upload across several Period rows."""
+    make_account(db, fy2025, "4-100", "Taxation")
+    make_account(db, fy2025, "6-100", "Salaries")
+    content = to_csv(
+        [{"Acct": "4-100", "Mo": "1", "Amt": "1000"},
+         {"Acct": "4-100", "Mo": "2", "Amt": "1100"},
+         {"Acct": "6-100", "Mo": "1", "Amt": "-200"},
+         {"Acct": "6-100", "Mo": "2", "Amt": "-220"}],
+        ["Acct", "Mo", "Amt"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "period": 1, "amount": 2})},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["records_imported"] == 4
+
+    jan = _tb_entry(client, auth, fy2025, "4-100")
+    assert jan is not None
+    assert Decimal(jan["period_debit"]) == Decimal("1000")
+    feb_rows = client.get("/api/v1/trial-balance", headers=auth("viewer"),
+                          params={"period_id": period_of(fy2025, 2).id}).json()
+    acct = next(a for a in client.get("/api/v1/accounts", headers=auth("viewer"),
+                                      params={"fiscal_year_id": fy2025.id}).json()
+                if a["acct_fmtd"] == "4-100")
+    feb_entry = next(e for e in feb_rows if e["account_id"] == acct["id"])
+    assert Decimal(feb_entry["period_debit"]) == Decimal("1100")
+
+
+def test_tb_import_period_column_accepts_month_name(client, auth, fy2025, db):
+    make_account(db, fy2025, "4-100", "Taxation")
+    content = to_csv([{"Acct": "4-100", "Mo": "February", "Amt": "500"}], ["Acct", "Mo", "Amt"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "period": 1, "amount": 2})},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["records_imported"] == 1
+    feb_rows = client.get("/api/v1/trial-balance", headers=auth("viewer"),
+                          params={"period_id": period_of(fy2025, 2).id}).json()
+    assert len(feb_rows) == 1
+    assert Decimal(feb_rows[0]["period_debit"]) == Decimal("500")
+
+
+def test_tb_import_unresolvable_period_is_a_row_error_not_a_hard_failure(client, auth, fy2025, db):
+    make_account(db, fy2025, "4-100", "Taxation")
+    content = to_csv(
+        [{"Acct": "4-100", "Mo": "1", "Amt": "1000"},
+         {"Acct": "4-100", "Mo": "Smarch", "Amt": "999"}],
+        ["Acct", "Mo", "Amt"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "period": 1, "amount": 2})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["records_imported"] == 1
+    assert len(body["errors"]) == 1 and "Smarch" in body["errors"][0]
+
+
+def test_tb_import_no_period_id_and_no_period_column_422(client, auth, fy2025):
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", to_csv([{"Acct": "4-100", "Amt": "1"}], ["Acct", "Amt"]), "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "amount": 1})},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["missing_fields"] == ["period_id"]
+
+
+def test_tb_import_closed_period_row_skipped_others_land(client, auth, fy2025, db):
+    make_account(db, fy2025, "4-100", "Taxation")
+    period_of(fy2025, 1).is_closed = True
+    db.commit()
+    content = to_csv(
+        [{"Acct": "4-100", "Mo": "1", "Amt": "1000"},
+         {"Acct": "4-100", "Mo": "2", "Amt": "1100"}],
+        ["Acct", "Mo", "Amt"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "period": 1, "amount": 2})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["records_imported"] == 1
+    assert len(body["errors"]) == 1 and "closed" in body["errors"][0]
+
+
+def test_tb_import_with_budget_column_creates_budget_lines(client, auth, fy2025, db):
+    """A mapped 'budget' column imports BudgetLine rows alongside the trial balance."""
+    make_account(db, fy2025, "4-100", "Taxation")
+    make_account(db, fy2025, "6-100", "Salaries")
+    content = to_csv(
+        [{"Acct": "4-100", "Amt": "1000", "Bud": "12000"},
+         {"Acct": "6-100", "Amt": "-200", "Bud": "2400"}],
+        ["Acct", "Amt", "Bud"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?period_id={period_of(fy2025, 1).id}&fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "amount": 1, "budget": 2})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["records_imported"] == 2
+    assert body["budget_lines_imported"] == 2
+
+    years = client.get("/api/v1/budget-years", headers=auth("viewer")).json()
+    by = next(y for y in years if y["fiscal_year_id"] == fy2025.id)
+    assert by["status"] == "setup"
+    variance = client.get(f"/api/v1/budget-years/{by['id']}/variance", headers=auth("viewer")).json()
+    rows = {row["acct_fmtd"]: row for row in variance["rows"]}
+    assert Decimal(rows["4-100"]["original_budget"]) == 12000
+    assert Decimal(rows["6-100"]["original_budget"]) == 2400
+
+
+def test_tb_import_budget_sums_across_mapped_periods(client, auth, fy2025, db):
+    """Budget amounts per account sum across every row of a multi-period import,
+    so a per-period budget share correctly reconstructs the annual figure."""
+    make_account(db, fy2025, "4-100", "Taxation")
+    content = to_csv(
+        [{"Acct": "4-100", "Mo": "1", "Amt": "1000", "Bud": "1000"},
+         {"Acct": "4-100", "Mo": "2", "Amt": "1000", "Bud": "1000"}],
+        ["Acct", "Mo", "Amt", "Bud"])
+    r = client.post(
+        f"/api/v1/trial-balance/import/csv?fiscal_year_id={fy2025.id}",
+        headers=auth("officer"),
+        files={"file": ("tb.csv", content, "text/csv")},
+        data={"column_map": json.dumps({"account_code": 0, "period": 1, "amount": 2, "budget": 3})},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["budget_lines_imported"] == 1
+
+    years = client.get("/api/v1/budget-years", headers=auth("viewer")).json()
+    by = next(y for y in years if y["fiscal_year_id"] == fy2025.id)
+    variance = client.get(f"/api/v1/budget-years/{by['id']}/variance", headers=auth("viewer")).json()
+    row = next(row for row in variance["rows"] if row["acct_fmtd"] == "4-100")
+    assert Decimal(row["original_budget"]) == 2000  # 1000 + 1000, the two period rows summed
+
+
+def test_tb_import_budget_reimport_overwrites_not_adds(client, auth, fy2025, db):
+    """Re-running the same import must not double the budget figure."""
+    make_account(db, fy2025, "4-100", "Taxation")
+    content = to_csv([{"Acct": "4-100", "Amt": "1000", "Bud": "5000"}], ["Acct", "Amt", "Bud"])
+    params = f"period_id={period_of(fy2025, 1).id}&fiscal_year_id={fy2025.id}"
+    mapping = {"column_map": json.dumps({"account_code": 0, "amount": 1, "budget": 2})}
+    for _ in range(2):
+        r = client.post(f"/api/v1/trial-balance/import/csv?{params}", headers=auth("officer"),
+                        files={"file": ("tb.csv", content, "text/csv")}, data=mapping)
+        assert r.status_code == 200, r.text
+
+    years = client.get("/api/v1/budget-years", headers=auth("viewer")).json()
+    by = next(y for y in years if y["fiscal_year_id"] == fy2025.id)
+    variance = client.get(f"/api/v1/budget-years/{by['id']}/variance", headers=auth("viewer")).json()
+    row = next(row for row in variance["rows"] if row["acct_fmtd"] == "4-100")
+    assert Decimal(row["original_budget"]) == 5000  # not 10000

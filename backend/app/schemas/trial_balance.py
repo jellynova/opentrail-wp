@@ -81,3 +81,4 @@ class ImportResult(BaseModel):
     records_imported: int
     records_updated: int
     errors: list[str] = []
+    budget_lines_imported: int = 0

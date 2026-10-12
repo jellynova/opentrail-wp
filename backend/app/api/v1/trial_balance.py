@@ -57,7 +57,7 @@ def get_trial_balance(
 @router.post("/trial-balance/import/csv", response_model=ImportResult)
 async def import_csv(
     request: Request,
-    period_id: int = Query(...),
+    period_id: Optional[int] = Query(None, description="Default/fallback period; required unless a 'period' column is mapped"),
     fiscal_year_id: int = Query(...),
     acct_fmtd_col: str = Query("Account", description="CSV column name for account identifier"),
     period_debit_col: str = Query("Debit", description="CSV column name for period debit"),
@@ -83,13 +83,22 @@ async def import_csv(
     """
     mapping = _column_map_or_422(column_map)
 
-    ensure_period_editable(db, period_id)
+    has_period_field = mapping is not None and "period" in mapping
+    if period_id is None and not has_period_field:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"message": "period_id is required unless a 'period' column is mapped",
+                    "missing_fields": ["period_id"]},
+        )
+    if period_id is not None:
+        ensure_period_editable(db, period_id)
     content = await file.read()
     if mapping is not None:
         # Explicit user mapping wins: the file is read exactly as mapped.
         field_map = {"account_code": "acct_fmtd", "debit": "period_debit", "credit": "period_credit",
                      "opening_debit": "opening_debit", "opening_credit": "opening_credit",
-                     "ytd_debit": "ytd_debit", "ytd_credit": "ytd_credit"}
+                     "ytd_debit": "ytd_debit", "ytd_credit": "ytd_credit",
+                     "period": "period", "budget": "budget"}
         try:
             fieldnames, rows, _used = import_parsers.mapped_rows(
                 content, file.filename or "", mapping, header_row=header_row, sheet=sheet,
@@ -100,6 +109,8 @@ async def import_csv(
         except import_parsers.ImportParseError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
         has_debit_credit = any(f in fieldnames for f in ("debit", "credit"))
+        has_period_col = "period" in fieldnames
+        has_budget_col = "budget" in fieldnames
         csv_rows: List[Dict[str, str]] = []
         for row in rows:
             out: Dict[str, str] = {"Account": row.get("account_code", "")}
@@ -113,12 +124,22 @@ async def import_csv(
             out["Opening Credit"] = row.get("opening_credit", "")
             out["YTD Debit"] = row.get("ytd_debit", "")
             out["YTD Credit"] = row.get("ytd_credit", "")
+            if has_period_col:
+                out["Period"] = row.get("period", "")
+            if has_budget_col:
+                out["Budget"] = row.get("budget", "")
             csv_rows.append(out)
+        out_fields = ["Account", "Debit", "Credit", "Opening Debit", "Opening Credit", "YTD Debit", "YTD Credit"]
         column_mapping = {"Account": "acct_fmtd", "Debit": "period_debit", "Credit": "period_credit",
                           "Opening Debit": "opening_debit", "Opening Credit": "opening_credit",
                           "YTD Debit": "ytd_debit", "YTD Credit": "ytd_credit"}
-        content = import_parsers.to_csv_bytes(["Account", "Debit", "Credit", "Opening Debit",
-                                               "Opening Credit", "YTD Debit", "YTD Credit"], csv_rows)
+        if has_period_col:
+            out_fields.append("Period")
+            column_mapping["Period"] = "period"
+        if has_budget_col:
+            out_fields.append("Budget")
+            column_mapping["Budget"] = "budget"
+        content = import_parsers.to_csv_bytes(out_fields, csv_rows)
     # CSV keeps the historical exact behaviour; everything else (xlsx, tab-delimited,
     # IIF, HTML report exports, Sage variants) is normalised by the shared parser and
     # mapped onto the canonical Account/Debit/Credit columns the service expects.
@@ -140,12 +161,13 @@ async def import_csv(
             ytd_debit_col: "ytd_debit",
             ytd_credit_col: "ytd_credit",
         }
-    imported, updated, errors = tb_svc.import_from_csv(
+    imported, updated, errors, budget_lines_imported = tb_svc.import_from_csv(
         db=db,
         period_id=period_id,
         file_content=content,
         column_mapping=column_mapping,
         fiscal_year_id=fiscal_year_id,
+        budget_created_by_user_id=current_user.id,
     )
     audit_svc.record(
         db,
@@ -153,12 +175,15 @@ async def import_csv(
         action="import",
         resource_type="trial_balance",
         resource_id=period_id,
-        new={"source": "csv", "imported": imported, "updated": updated, "errors": len(errors)},
-        summary=f"imported a trial balance from CSV ({imported} new, {updated} updated)",
+        new={"source": "csv", "imported": imported, "updated": updated, "errors": len(errors),
+             "budget_lines_imported": budget_lines_imported},
+        summary=f"imported a trial balance from CSV ({imported} new, {updated} updated"
+                f"{f', {budget_lines_imported} budget line(s)' if budget_lines_imported else ''})",
         request=request,
         commit=True,
     )
-    return ImportResult(records_imported=imported, records_updated=updated, errors=errors)
+    return ImportResult(records_imported=imported, records_updated=updated, errors=errors,
+                        budget_lines_imported=budget_lines_imported)
 
 
 @router.post("/trial-balance/import/connector", response_model=ImportResult)

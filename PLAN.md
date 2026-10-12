@@ -989,6 +989,8 @@ code stands against it and the deviations worth knowing about._
 | Post-Phase-8 — mapped import | Caseware-style user-mappable column importer: explicit `column_map` bypasses header/alias auto-detection, same persistence path either way |
 | Post-Phase-8 — leadsheets | Leadsheet viewer page with leadsheet-to-document account links |
 | Post-Phase-8 — fiscal-year reopen | `finance_admin`-only, audited, force-capable reopen of a locked fiscal year |
+| Post-Phase-8 — multi-period trial balance import | A mapped "period" column (number, month name, or date) splits one uploaded file across several `Period` rows in one call; closed periods are skipped per-row, not a hard failure |
+| Post-Phase-8 — budget-from-trial-balance import | A mapped "budget" column alongside the TB import upserts matching `BudgetLine`s (summed per account across all rows, so a per-period share correctly reconstructs the annual figure), creating the fiscal year's budget year if none exists |
 
 ### Deviations
 

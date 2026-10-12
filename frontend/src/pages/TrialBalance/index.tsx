@@ -43,6 +43,7 @@ function NetBalanceCell({ debit, credit }: { debit: string; credit: string }) {
 const TB_FIELDS: CanonicalField[] = [
   { key: 'account_code', label: 'Account code', required: true },
   { key: 'account_name', label: 'Account name' },
+  { key: 'period', label: 'Period (number, month name, or date) — splits one file across periods' },
   { key: 'debit', label: 'Period debit' },
   { key: 'credit', label: 'Period credit' },
   { key: 'amount', label: 'Amount (signed; debit positive)' },
@@ -50,6 +51,7 @@ const TB_FIELDS: CanonicalField[] = [
   { key: 'opening_credit', label: 'Opening credit' },
   { key: 'ytd_debit', label: 'YTD debit' },
   { key: 'ytd_credit', label: 'YTD credit' },
+  { key: 'budget', label: 'Budget amount — also imports a budget line for this account' },
   { key: 'description', label: 'Description' },
 ]
 
@@ -201,10 +203,11 @@ export function TrialBalancePage() {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    if (!selectedPeriodId || !selectedFYId) {
+    if (!selectedFYId) {
       toast({
-        title: 'Select a fiscal year and period first',
-        description: 'The import needs to know which year the accounts belong to.',
+        title: 'Select a fiscal year first',
+        description: 'The import needs to know which fiscal year the accounts belong to. ' +
+          'A period is only required if your file has no "Period" column mapped.',
         variant: 'destructive',
       })
       return
@@ -224,7 +227,7 @@ export function TrialBalancePage() {
               variant="outline"
               size="sm"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!selectedPeriodId}
+              disabled={!selectedFYId}
             >
               <Upload className="mr-2 h-4 w-4" />
               Import file
@@ -387,14 +390,23 @@ export function TrialBalancePage() {
         title="Import trial balance"
         onImportSuccess={() => void queryClient?.invalidateQueries({ queryKey: ['trial-balance', selectedPeriodId] })}
         onImported={(data) => {
-          const result = data as { records_imported?: number; records_updated?: number; errors?: string[] }
+          const result = data as {
+            records_imported?: number
+            records_updated?: number
+            errors?: string[]
+            budget_lines_imported?: number
+          }
           toast({
             title: 'Import complete',
             description:
               `${result.records_imported ?? 0} new, ${result.records_updated ?? 0} updated` +
+              `${result.budget_lines_imported ? `, ${result.budget_lines_imported} budget line(s)` : ''}` +
               `${result.errors?.length ? `, ${result.errors.length} row error(s)` : ''}.`,
             variant: result.errors?.length ? 'destructive' : undefined,
           })
+          if (result.budget_lines_imported) {
+            void queryClient?.invalidateQueries({ queryKey: ['budget-years'] })
+          }
         }}
       />
     </div>

@@ -4,3 +4,8 @@ __pycache__/
 node_modules/
 dist/
 .env
+frontend/*.tsbuildinfo
+frontend/tailwind.config.js
+frontend/tailwind.config.d.ts
+frontend/vite.config.js
+frontend/vite.config.d.ts
