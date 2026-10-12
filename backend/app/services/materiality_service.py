@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.document_links import DocumentAccountLink
+from app.models.account_comment import AccountComment
 from app.models.materiality import Materiality
 from app.services.working_papers import get_period, leadsheets
 
@@ -52,9 +53,11 @@ def flagging_threshold(materiality: Materiality) -> Decimal:
 def unsupported_material_accounts(db: Session, period_id: int, scheme: Any = "PSAB") -> Dict[str, Any]:
     """
     Leadsheet accounts through ``period_id`` whose |final balance| meets or exceeds the
-    fiscal year's flagging threshold but carry zero DocumentAccountLink rows. Returns an
-    empty, threshold-less result (not an error) when no materiality has been set yet --
-    the feature is opt-in per fiscal year.
+    fiscal year's flagging threshold but carry zero DocumentAccountLink rows AND zero
+    AccountComment rows -- an account is "supported" either by an attached document or
+    by a comment explaining the variance, since not every material balance needs a file.
+    Returns an empty, threshold-less result (not an error) when no materiality has been
+    set yet -- the feature is opt-in per fiscal year.
     """
     period = get_period(db, period_id)
     materiality = get_materiality(db, period.fiscal_year_id)
@@ -71,13 +74,19 @@ def unsupported_material_accounts(db: Session, period_id: int, scheme: Any = "PS
             )
         ).all()
     )
+    commented_codes = set(
+        db.scalars(
+            select(AccountComment.account_code).where(AccountComment.fiscal_year_id == period.fiscal_year_id)
+        ).all()
+    )
+    supported_codes = linked_codes | commented_codes
 
     result = leadsheets(db, period_id, scheme)
     flagged = []
     for group in result["leadsheets"]:
         for acct in group["accounts"]:
             final = acct["final"]
-            if abs(final) >= threshold and acct["acct_fmtd"] not in linked_codes:
+            if abs(final) >= threshold and acct["acct_fmtd"] not in supported_codes:
                 flagged.append(
                     {
                         "account_id": acct["account_id"],

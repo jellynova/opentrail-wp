@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
-import type { AccountLink, LeadsheetsResponse, MappingScheme, RelatedDocument, WorkingPaper } from '@/types'
+import type { AccountComment, AccountLink, LeadsheetsResponse, MappingScheme, RelatedDocument, WorkingPaper } from '@/types'
 
 export function useLeadsheets(periodId: number | null, scheme: string) {
   return useQuery({
@@ -135,5 +135,66 @@ export function useAddRelatedDocument() {
 export function useRemoveRelatedDocument() {
   return useRelatedDocumentMutation<{ documentId: number; linkId: number }>(
     ({ documentId, linkId }) => api.delete(`/v1/working-papers/${documentId}/related-documents/${linkId}`)
+  )
+}
+
+// ── Account comments ("explain a variance" without a document) ─────────────
+
+export function useAccountComments(accountCode: string | null, fiscalYearId: number | null) {
+  return useQuery({
+    queryKey: ['account-comments', accountCode, fiscalYearId],
+    queryFn: () =>
+      api
+        .get<AccountComment[]>(`/v1/working-papers/by-account/${encodeURIComponent(accountCode!)}/comments`, {
+          params: { fiscal_year_id: fiscalYearId },
+        })
+        .then((r) => r.data),
+    enabled: !!accountCode && fiscalYearId !== null,
+  })
+}
+
+/** Every comment for a fiscal year, fetched once so leadsheet rows can show counts cheaply. */
+export function useAllAccountComments(fiscalYearId: number | null) {
+  return useQuery({
+    queryKey: ['account-comments', 'by-year', fiscalYearId],
+    queryFn: () =>
+      api.get<AccountComment[]>('/v1/working-papers/comments', { params: { fiscal_year_id: fiscalYearId! } }).then((r) => r.data),
+    enabled: fiscalYearId !== null,
+  })
+}
+
+function useCommentMutation<TVars>(fn: (vars: TVars) => Promise<unknown>) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['account-comments'] })
+      void queryClient.invalidateQueries({ queryKey: ['unsupported-material-accounts'] })
+    },
+  })
+}
+
+export function useAddAccountComment() {
+  return useCommentMutation<{ accountCode: string; fiscal_year_id: number; text: string }>(
+    ({ accountCode, ...body }) =>
+      api.post<AccountComment>(`/v1/working-papers/by-account/${encodeURIComponent(accountCode)}/comments`, body)
+  )
+}
+
+export function useResolveAccountComment() {
+  return useCommentMutation<{ accountCode: string; commentId: number; resolved: boolean }>(
+    ({ accountCode, commentId, resolved }) =>
+      api.post(
+        `/v1/working-papers/by-account/${encodeURIComponent(accountCode)}/comments/${commentId}/resolve`,
+        null,
+        { params: { resolved } }
+      )
+  )
+}
+
+export function useDeleteAccountComment() {
+  return useCommentMutation<{ accountCode: string; commentId: number }>(
+    ({ accountCode, commentId }) =>
+      api.delete(`/v1/working-papers/by-account/${encodeURIComponent(accountCode)}/comments/${commentId}`)
   )
 }

@@ -13,7 +13,7 @@ import {
   YAxis,
   ZAxis,
 } from 'recharts'
-import { AlertTriangle, Eye, Link2, Link2Off, Loader2, Search, Sheet, Target } from 'lucide-react'
+import { AlertTriangle, Eye, Link2, Link2Off, Loader2, MessageSquare, Search, Sheet, Target } from 'lucide-react'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { DocumentPreviewDialog } from '@/components/shared/DocumentPreviewDialog'
@@ -41,17 +41,22 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useAuthStore } from '@/store/auth'
-import { apiErrorMessage, formatCurrency } from '@/lib/utils'
+import { apiErrorMessage, formatCurrency, formatDate } from '@/lib/utils'
 import { toast } from '@/hooks/useToast'
 import { useFiscalYears, usePeriods } from '@/hooks/useFiscalYears'
 import {
+  useAccountComments,
+  useAddAccountComment,
   useAddAccountLink,
+  useAllAccountComments,
   useAllAccountLinks,
+  useDeleteAccountComment,
   useDocumentsForLinks,
   useLeadsheets,
   useLinksByAccount,
   useMappingSchemes,
   useRemoveAccountLink,
+  useResolveAccountComment,
 } from '@/hooks/useLeadsheets'
 import { useMateriality, useSetMateriality, useUnsupportedMaterialAccounts } from '@/hooks/useMateriality'
 import type {
@@ -72,17 +77,21 @@ function LeadsheetTable({
   totals,
   fiscalYearId,
   linkedCounts,
+  commentCounts,
   flaggedAccounts,
   canEdit,
   onManageLinks,
+  onManageComments,
 }: {
   accounts: LeadsheetAccount[]
   totals: LeadsheetTotals
   fiscalYearId: number | null
   linkedCounts: Map<string, number>
+  commentCounts: Map<string, number>
   flaggedAccounts: Map<string, UnsupportedMaterialAccount>
   canEdit: boolean
   onManageLinks: (accountCode: string) => void
+  onManageComments: (accountCode: string) => void
 }) {
   const [filter, setFilter] = useState('')
 
@@ -128,11 +137,13 @@ function LeadsheetTable({
                 <TableHead className="text-right">Final</TableHead>
                 <TableHead className="text-right">Change</TableHead>
                 <TableHead className="w-28">Documents</TableHead>
+                <TableHead className="w-24">Notes</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((a) => {
                 const linkCount = linkedCounts.get(a.acct_fmtd) ?? 0
+                const commentCount = commentCounts.get(a.acct_fmtd) ?? 0
                 const flag = flaggedAccounts.get(a.acct_fmtd)
                 return (
                   <TableRow key={a.account_id} className={flag ? 'bg-destructive/5' : ''}>
@@ -177,12 +188,26 @@ function LeadsheetTable({
                         </button>
                       </div>
                     </TableCell>
+                    <TableCell>
+                      <button
+                        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => onManageComments(a.acct_fmtd)}
+                        title={canEdit ? 'Add or view notes explaining this account' : 'View notes'}
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                        {commentCount > 0 ? (
+                          <span className="font-medium text-primary">{commentCount}</span>
+                        ) : (
+                          <span>—</span>
+                        )}
+                      </button>
+                    </TableCell>
                   </TableRow>
                 )
               })}
               {!rows.length && (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
+                  <TableCell colSpan={10} className="text-center text-sm text-muted-foreground py-8">
                     No accounts match the filter.
                   </TableCell>
                 </TableRow>
@@ -197,6 +222,7 @@ function LeadsheetTable({
                 <TableCell className="text-right font-mono text-xs">{formatCurrency(totals.rje)}</TableCell>
                 <TableCell className="text-right font-mono text-xs font-medium">{formatCurrency(totals.final)}</TableCell>
                 <TableCell className="text-right font-mono text-xs">{formatCurrency(totals.change)}</TableCell>
+                <TableCell />
                 <TableCell />
               </TableRow>
             </TableFooter>
@@ -320,6 +346,110 @@ function MaterialityDialog({
               Save
             </Button>
           )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Account comments ("explain a variance" without a document) ──────────────
+
+function CommentsDialog({
+  accountCode,
+  fiscalYearId,
+  onClose,
+}: {
+  accountCode: string | null
+  fiscalYearId: number | null
+  onClose: () => void
+}) {
+  const canEdit = useAuthStore((s) => s.hasRole(['finance_admin', 'finance_officer']))
+  const currentUserId = useAuthStore((s) => s.user?.id)
+  const { data: comments, isLoading } = useAccountComments(accountCode, fiscalYearId)
+  const addComment = useAddAccountComment()
+  const resolveComment = useResolveAccountComment()
+  const deleteComment = useDeleteAccountComment()
+  const [text, setText] = useState('')
+
+  if (!accountCode) return null
+
+  const submit = () => {
+    if (!text.trim() || !fiscalYearId) return
+    addComment.mutate(
+      { accountCode, fiscal_year_id: fiscalYearId, text: text.trim() },
+      {
+        onSuccess: () => setText(''),
+        onError: (err) => toast({ title: 'Could not add note', description: apiErrorMessage(err), variant: 'destructive' }),
+      }
+    )
+  }
+
+  return (
+    <Dialog open={!!accountCode} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>
+            Notes on account <span className="font-mono">{accountCode}</span>
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground">
+          Explain a variance directly, without attaching a document. Counts the same as a linked document for
+          materiality flagging.
+        </p>
+        {isLoading ? (
+          <LoadingSpinner />
+        ) : (
+          <div className="max-h-[40vh] space-y-1 overflow-y-auto">
+            {!comments?.length && (
+              <p className="py-4 text-center text-xs text-muted-foreground">No notes yet.</p>
+            )}
+            {comments?.map((c) => (
+              <div key={c.id} className="flex items-start justify-between gap-2 rounded-sm bg-muted/50 px-2 py-1.5">
+                <div className="min-w-0">
+                  <p className={`text-xs ${c.is_resolved ? 'text-muted-foreground line-through' : ''}`}>{c.text}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {c.created_by_username ?? 'unknown'} · {formatDate(c.created_at)}
+                    {c.is_resolved && c.resolved_by_username && ` · resolved by ${c.resolved_by_username}`}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    className="text-[10px] text-primary hover:underline"
+                    onClick={() =>
+                      resolveComment.mutate({ accountCode, commentId: c.id, resolved: !c.is_resolved })
+                    }
+                  >
+                    {c.is_resolved ? 'reopen' : 'resolve'}
+                  </button>
+                  {(c.created_by_user_id === currentUserId || canEdit) && (
+                    <button
+                      className="text-[10px] text-destructive hover:underline"
+                      onClick={() => deleteComment.mutate({ accountCode, commentId: c.id })}
+                    >
+                      delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {canEdit && (
+          <div className="flex gap-2">
+            <Input
+              placeholder="e.g. Variance is the Q3 grant reimbursement, timing only…"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && submit()}
+            />
+            <Button size="sm" disabled={!text.trim() || addComment.isPending} onClick={submit}>
+              {addComment.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Add
+            </Button>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -611,6 +741,7 @@ export function LeadsheetsPage() {
   const [previewPaper, setPreviewPaper] = useState<WorkingPaper | null>(null)
   const [relatedPaper, setRelatedPaper] = useState<WorkingPaper | null>(null)
   const [materialityOpen, setMaterialityOpen] = useState(false)
+  const [commentsAccountCode, setCommentsAccountCode] = useState<string | null>(null)
 
   const { data: fiscalYears, isLoading: fyLoading } = useFiscalYears()
   const { data: periods, isLoading: periodsLoading } = usePeriods(selectedFYId)
@@ -620,6 +751,7 @@ export function LeadsheetsPage() {
   const { data: allDocuments } = useDocumentsForLinks(selectedFYId)
   const { data: materiality } = useMateriality(selectedFYId)
   const { data: unsupported } = useUnsupportedMaterialAccounts(selectedFYId, selectedPeriodId, scheme)
+  const { data: allComments } = useAllAccountComments(selectedFYId)
 
   // account code -> number of linked documents, for the per-row indicators
   const linkedCounts = useMemo(() => {
@@ -627,6 +759,13 @@ export function LeadsheetsPage() {
     for (const l of allLinks ?? []) m.set(l.account_code, (m.get(l.account_code) ?? 0) + 1)
     return m
   }, [allLinks])
+
+  // account code -> number of notes, for the per-row indicators
+  const commentCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const c of allComments ?? []) m.set(c.account_code, (m.get(c.account_code) ?? 0) + 1)
+    return m
+  }, [allComments])
 
   // account code -> flag detail, for material balances with no supporting document
   const flaggedAccounts = useMemo(() => {
@@ -776,9 +915,11 @@ export function LeadsheetsPage() {
                   totals={currentSheet.totals}
                   fiscalYearId={selectedFYId}
                   linkedCounts={linkedCounts}
+                  commentCounts={commentCounts}
                   flaggedAccounts={flaggedAccounts}
                   canEdit={canEdit}
                   onManageLinks={setLinkAccountCode}
+                  onManageComments={setCommentsAccountCode}
                 />
               </>
             ) : (
@@ -842,6 +983,11 @@ export function LeadsheetsPage() {
         open={materialityOpen}
         fiscalYearId={selectedFYId}
         onClose={() => setMaterialityOpen(false)}
+      />
+      <CommentsDialog
+        accountCode={commentsAccountCode}
+        fiscalYearId={selectedFYId}
+        onClose={() => setCommentsAccountCode(null)}
       />
     </div>
   )

@@ -144,3 +144,26 @@ def test_unsupported_material_accounts_uses_performance_materiality_when_set(cli
     # $40,000 is below overall (50k) but above performance materiality (37.5k) -- flagged.
     assert body["threshold_basis"] == "performance_materiality"
     assert [a["acct_fmtd"] for a in body["accounts"]] == ["1-100"]
+
+
+def test_unsupported_material_accounts_excludes_accounts_with_a_comment(client, auth, fy2025, db):
+    """A comment explaining the variance counts as support, same as a document link."""
+    make_scheme(db)
+    commented = make_account(db, fy2025, "1-100", "Cash")
+    uncommented = make_account(db, fy2025, "6-100", "Office supplies")
+    p1 = period_of(fy2025, 1)
+    add_tb(db, p1, commented, ytd=100000)
+    add_tb(db, p1, uncommented, ytd=90000)
+
+    client.put(f"/api/v1/materiality/{fy2025.id}", json={"overall_materiality": "50000"}, headers=auth("officer"))
+    client.post(
+        "/api/v1/working-papers/by-account/1-100/comments",
+        json={"fiscal_year_id": fy2025.id, "text": "Variance due to the Q1 grant reimbursement, no document needed."},
+        headers=auth("officer"),
+    )
+
+    r = client.get(
+        f"/api/v1/materiality/{fy2025.id}/unsupported-accounts", params={"period_id": p1.id}, headers=auth("viewer")
+    )
+    codes = [a["acct_fmtd"] for a in r.json()["accounts"]]
+    assert codes == ["6-100"]  # the commented account is excluded; the other remains flagged

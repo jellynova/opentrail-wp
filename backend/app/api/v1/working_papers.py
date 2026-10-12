@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
@@ -8,9 +9,12 @@ from app.core.database import get_db
 from app.core.security import get_current_active_user, require_role
 from app.models.document import WorkingPaper
 from app.models.document_links import DocumentAccountLink, DocumentCrossLink
+from app.models.account_comment import AccountComment
 from app.models.period import FiscalYear
 from app.models.user import User
 from app.schemas.document_links import (
+    AccountCommentCreate,
+    AccountCommentResponse,
     AccountLinkCreate,
     AccountLinkResponse,
     RelatedDocumentCreate,
@@ -374,3 +378,175 @@ def remove_related_document(
         commit=True,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Account comments ("explain a variance" without a document) ──────────────
+
+
+def _comment_response(db: Session, c: AccountComment) -> AccountCommentResponse:
+    usernames = {
+        u.id: u.username
+        for u in db.scalars(
+            select(User).where(User.id.in_({c.created_by_user_id, c.resolved_by_user_id} - {None}))
+        ).all()
+    }
+    return AccountCommentResponse(
+        id=c.id,
+        account_code=c.account_code,
+        fiscal_year_id=c.fiscal_year_id,
+        text=c.text,
+        created_by_user_id=c.created_by_user_id,
+        created_by_username=usernames.get(c.created_by_user_id),
+        created_at=c.created_at,
+        is_resolved=c.is_resolved,
+        resolved_by_user_id=c.resolved_by_user_id,
+        resolved_by_username=usernames.get(c.resolved_by_user_id) if c.resolved_by_user_id else None,
+        resolved_at=c.resolved_at,
+    )
+
+
+@router.get(
+    "/working-papers/by-account/{account_code}/comments",
+    response_model=List[AccountCommentResponse],
+)
+def list_account_comments(
+    account_code: str,
+    fiscal_year_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Comments explaining this account's balance/variance (any authenticated user)."""
+    comments = db.scalars(
+        select(AccountComment)
+        .where(AccountComment.account_code == account_code, AccountComment.fiscal_year_id == fiscal_year_id)
+        .order_by(AccountComment.created_at)
+    ).all()
+    return [_comment_response(db, c) for c in comments]
+
+
+@router.get("/working-papers/comments", response_model=List[AccountCommentResponse])
+def list_all_account_comments(
+    fiscal_year_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Every account comment for a fiscal year, for cheap per-row indicators on the leadsheet."""
+    comments = db.scalars(
+        select(AccountComment)
+        .where(AccountComment.fiscal_year_id == fiscal_year_id)
+        .order_by(AccountComment.created_at)
+    ).all()
+    return [_comment_response(db, c) for c in comments]
+
+
+@router.post(
+    "/working-papers/by-account/{account_code}/comments",
+    response_model=AccountCommentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_account_comment(
+    account_code: str,
+    data: AccountCommentCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("finance_admin", "finance_officer")),
+):
+    """Add a comment explaining this account's variance (officer and above)."""
+    if db.get(FiscalYear, data.fiscal_year_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fiscal year not found")
+    text = data.text.strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Comment text is required")
+
+    comment = AccountComment(
+        account_code=account_code.strip(),
+        fiscal_year_id=data.fiscal_year_id,
+        text=text,
+        created_by_user_id=current_user.id,
+    )
+    db.add(comment)
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="create",
+        resource_type="account_comment",
+        resource_id=comment.id,
+        new={"account_code": comment.account_code, "fiscal_year_id": comment.fiscal_year_id, "text": text},
+        summary=f"commented on account {comment.account_code}",
+        request=request,
+        commit=True,
+    )
+    db.refresh(comment)
+    return _comment_response(db, comment)
+
+
+@router.post(
+    "/working-papers/by-account/{account_code}/comments/{comment_id}/resolve",
+    response_model=AccountCommentResponse,
+)
+def resolve_account_comment(
+    account_code: str,
+    comment_id: int,
+    request: Request,
+    resolved: bool = Query(True, description="False re-opens the comment"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    comment = db.get(AccountComment, comment_id)
+    if comment is None or comment.account_code != account_code:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+
+    comment.is_resolved = resolved
+    comment.resolved_by_user_id = current_user.id if resolved else None
+    comment.resolved_at = datetime.now(timezone.utc) if resolved else None
+
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="resolve_comment" if resolved else "reopen_comment",
+        resource_type="account_comment",
+        resource_id=comment.id,
+        new={"is_resolved": resolved},
+        summary=f"{'resolved' if resolved else 'reopened'} a comment on account {account_code}",
+        request=request,
+        commit=True,
+    )
+    db.refresh(comment)
+    return _comment_response(db, comment)
+
+
+@router.delete(
+    "/working-papers/by-account/{account_code}/comments/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_account_comment(
+    account_code: str,
+    comment_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Only the author or a finance_admin can delete a comment."""
+    comment = db.get(AccountComment, comment_id)
+    if comment is None or comment.account_code != account_code:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+    if comment.created_by_user_id != current_user.id and current_user.role != "finance_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Only the author or a finance_admin can delete a comment"
+        )
+    db.delete(comment)
+    db.flush()
+    audit_svc.record(
+        db,
+        user=current_user,
+        action="delete",
+        resource_type="account_comment",
+        resource_id=comment_id,
+        old={"account_code": account_code, "text": comment.text},
+        summary=f"deleted a comment on account {account_code}",
+        request=request,
+        commit=True,
+    )
+    db.commit()

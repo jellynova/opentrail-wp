@@ -60,6 +60,30 @@ class RelatedDocumentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AccountCommentCreate(BaseModel):
+    fiscal_year_id: int
+    text: str
+
+
+class AccountCommentResponse(BaseModel):
+    """A comment explaining an account's variance -- a lighter alternative to attaching
+    a supporting document; counts the same for materiality flagging purposes."""
+
+    id: int
+    account_code: str
+    fiscal_year_id: int
+    text: str
+    created_by_user_id: int
+    created_by_username: Optional[str] = None
+    created_at: datetime
+    is_resolved: bool
+    resolved_by_user_id: Optional[int] = None
+    resolved_by_username: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
 class FiscalYearReopenRequest(BaseModel):
     reason: str
     # Required to reopen a *locked* year; ordinary closed years need only a reason.

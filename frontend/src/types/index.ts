@@ -562,6 +562,21 @@ export interface AccountLink {
   document_folder_path: string | null
 }
 
+/** A comment explaining an account's variance -- a lighter alternative to a document link. */
+export interface AccountComment {
+  id: number
+  account_code: string
+  fiscal_year_id: number
+  text: string
+  created_by_user_id: number
+  created_by_username: string | null
+  created_at: string
+  is_resolved: boolean
+  resolved_by_user_id: number | null
+  resolved_by_username: string | null
+  resolved_at: string | null
+}
+
 /** A cross-reference between two documents/leadsheets (document_cross_links). */
 export interface RelatedDocument {
   id: number
