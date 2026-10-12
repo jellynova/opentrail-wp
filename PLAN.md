@@ -964,3 +964,76 @@ This is not optional — it's required for accountability in public sector finan
 **Why WeasyPrint over ReportLab?** WeasyPrint lets you design statements in CSS/HTML, which is far more maintainable than ReportLab's programmatic PDF layout. Municipal financial statements have complex multi-column layouts that CSS handles well.
 
 **Why SSE over WebSockets for real-time?** For 4–10 users in a local network, SSE is sufficient and dramatically simpler to implement. WebSockets add complexity (connection management, reconnection logic) that isn't justified at this scale.
+
+---
+
+## Implementation Status
+
+_Updated after Phases 7 and 8. Sections above are the specification; this records where the
+code stands against it and the deviations worth knowing about._
+
+### Complete
+
+| Plan section | Notes |
+|---|---|
+| Phase 1 — foundation, auth, periods | Docker Compose stack, JWT auth, four roles, fiscal years and periods |
+| Phase 2 — trial balance & COA | Segment definitions, mapping schemes, classifications, CSV and connector import |
+| Phase 3 — SQL connectors | AMAIS queries as specified, custom query support, Fernet-encrypted credentials |
+| Phase 4 — journal entries | Four entry types, post/approve/unpost, configurable balance enforcement, auto schedules |
+| Phase 5 — report builder | Tree definition, formula rows, comparative columns, built-in PSAB and LGDE templates, PDF/Excel |
+| Phase 6 — budgeting | Requests, review, consolidation, amendments, variance, council report |
+| Phase 7 — documents | Binder folders, versioning, review notes, two-level sign-off, period close, roll forward |
+| Phase 8 — collaboration | Optimistic locking, SSE notifications, audit trail with activity views |
+| §5.2 PS 3150 — TCA schedule | Continuity schedule by asset class, CSV import, manual entry, year-over-year carry-forward, reconciliation to the GL |
+| Post-Phase-8 — flexible import | XLSX and QuickBooks/Sage (IIF) exports accepted on every import endpoint, alongside CSV/TSV |
+| Post-Phase-8 — mapped import | Caseware-style user-mappable column importer: explicit `column_map` bypasses header/alias auto-detection, same persistence path either way |
+| Post-Phase-8 — leadsheets | Leadsheet viewer page with leadsheet-to-document account links |
+| Post-Phase-8 — web-based document viewing | `GET /documents/{id}/view` serves pdf/img files with `Content-Disposition: inline`; a shared `DocumentPreviewDialog` renders them in-browser (iframe/`<img>` from a blob URL) from both the Documents page and the Leadsheets document picker, instead of only offering a download |
+| Post-Phase-8 — document-to-document file linking | `document_cross_links` table + `/working-papers/{id}/related-documents` CRUD cross-references two working papers (e.g. an adjustment memo to the reconciliation it supports); symmetric, dedup'd either direction, reachable from both the Documents page and the Leadsheets document picker |
+| Post-Phase-8 — materiality | Per-fiscal-year materiality threshold (overall + optional performance materiality); flags leadsheet accounts whose final balance meets/exceeds the threshold but have zero linked supporting documents (`/materiality/{fiscal_year_id}`, `/materiality/{fiscal_year_id}/unsupported-accounts`), surfaced as a warning badge directly on the leadsheet row |
+| Post-Phase-8 — account comments | `account_comments` table + `/working-papers/by-account/{code}/comments` CRUD: explain a variance directly on an account (no document required); a comment counts the same as a document link for materiality flagging, and shows as a "Notes" count on the leadsheet row |
+| Post-Phase-8 — data visualization (beyond CaseWare) | Leadsheets page gained two client-side charts with no new backend surface: an "audit risk map" (balance size × document-support count, colour-coded by materiality/support) and a year-over-year bar chart per leadsheet classification |
+| Post-Phase-8 — shared drive storage (CaseWare-style single filing) | `SHARED_DRIVE_PATH` config option: once set, ALL new documents are saved onto the mounted network drive / SharePoint sync folder instead of OpenTrail's own volume (`storage_backend="shared_drive"`); existing files already on the drive can be linked without copying bytes (`GET /documents/shared-drive/browse`, `POST /documents/link`); edits made directly on the drive outside the app are detected via content-hash drift checks and void sign-off (`is_missing`, `missing_since` surfaced in the UI); new versions overwrite the canonical path in place with a dated backup colocated on the same drive (`.opentrail-versions/`, not a second filing system); deleting a shared-drive document's link never touches the organization's real file. Documents uploaded before this was configured keep working unchanged from OpenTrail's own volume ("managed" backend) — no forced migration |
+| Post-Phase-8 — fiscal-year reopen | `finance_admin`-only, audited, force-capable reopen of a locked fiscal year |
+| Post-Phase-8 — multi-period trial balance import | A mapped "period" column (number, month name, or date) splits one uploaded file across several `Period` rows in one call; closed periods are skipped per-row, not a hard failure |
+| Post-Phase-8 — budget-from-trial-balance import | A mapped "budget" column alongside the TB import upserts matching `BudgetLine`s (summed per account across all rows, so a per-period share correctly reconstructs the annual figure), creating the fiscal year's budget year if none exists |
+
+### Deviations
+
+- **Period-close snapshot** is stored in `period_closes` / `period_close_balances` rather
+  than written back into `TrialBalanceEntry` (§7.3). The trial balance holds unadjusted
+  ERP figures and the balance engine adds posted adjustments on top, so writing adjusted
+  closing balances back would double-count every AJE and RJE.
+- **Working-paper sign-off** is first-class state on the version row (preparer and
+  reviewer user + timestamp, plus a re-approval flag) rather than annotations, so a
+  document's status can be queried and enforced.
+- **Sign-off segregation of duties**: the reviewer must be a `finance_admin` and cannot be
+  the preparer. A finance_admin who prepares a paper needs an officer to sign it off
+  first — the same rule the budget module applies to request reviews.
+- **TCA schedule source** (§5.2/§3.2): `fa-hdr` is empty at the surveyed AMAIS installation,
+  so the schedule is held in OpenTrail (`tca_schedule_lines`) and filled from the
+  municipality's asset register by CSV import or manual entry, rather than derived from the
+  GL. Deriving it from `capital-acct` flags was rejected: the GL carries no asset-class
+  detail, so a derived schedule could not show the continuity by class PS 3150 requires.
+  Closing cost, closing accumulated amortization and net book value are derived, and the
+  schedule is reconciled against the GL accounts classified as TCA cost / accumulated
+  amortization (`non_financial_assets.tca_cost`, `non_financial_assets.tca_amortization`) —
+  differences are reported, not enforced, since assets under construction or GL-only
+  adjustments are legitimate.
+- **SSE authentication** accepts the access token as a `token` query parameter, because
+  `EventSource` cannot set an `Authorization` header. Acceptable for a locally hosted
+  deployment; see the deployment guide in `README.md`.
+
+### Not yet built (Phase 4 of the build order)
+
+- **VADIM connector pulls** (§3.3). The connection layer is generic and VADIM connectors
+  can be configured and tested, but `pull_coa` / `pull_trial_balance` / `pull_budget` are
+  AMAIS-only and return `501 Not Implemented`. The VADIM query templates are not in this
+  plan — they need the same SYSCOLUMNS-style schema confirmation the AMAIS queries got.
+  Guessing the schema would risk silently importing wrong financial data, so the pull
+  endpoints stay unimplemented until a VADIM installation can be introspected.
+
+Multi-year comparatives are available: the report builder resolves `year_offset` columns
+against the corresponding fiscal year, so any report — including the built-in PSAB
+templates, which ship a prior-year column — can compare two or more years, and the budget
+module adds its own budget/actual multi-year view (§6.3).
